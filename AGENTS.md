@@ -4,8 +4,6 @@
 
 Dunewyrm is a Rust control-kernel project in the Dominatus / DragonGod / Dreadfang family.
 
-Pre-M0 is scaffold-and-contract only. Do not implement runtime features during Pre-M0.
-
 ## Naming convention
 
 Dunewyrm intentionally uses CamelCase for public and author-facing functions.
