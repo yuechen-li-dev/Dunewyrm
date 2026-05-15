@@ -12,7 +12,7 @@ pub use board::{DwBoard, DwBoardChunk, DwBoardKind, DwBoardValue, DwKey, DwSlotC
 pub use control::{
     Dw, DwControl, DwControlSummary, DwDecideOptions, DwScoreFn, DwTieBreak, DwUtilityCandidate,
 };
-pub use ids::DwFrameId;
+pub use ids::{DwActId, DwActRequest, DwDeferredAct, DwFrameId};
 pub use mailbox::{DwMailbox, DwMailboxChunk, DwMessage};
 pub use phase::DwPhase;
 pub use registry::{DwFrameDef, DwFrameFn, DwFrameRegistry};
@@ -819,6 +819,9 @@ mod tests {
             StagedMailbox: vec![],
             FailureReason: None,
             Decisions: vec![],
+            ImmediateActs: vec![],
+            MaturedDeferredActs: vec![],
+            PendingDeferredActs: vec![],
         }];
         let same = expected.clone();
         let matching = CompareTrace(&expected, &same);
@@ -1499,6 +1502,115 @@ mod m7_tests {
                     .iter()
                     .any(|(id, _)| *id == patrol),
             "decision records should include candidate target IDs for inspectability"
+        );
+    }
+
+    #[test]
+    fn M8ActuationImmediateAndDeferredTimingAndPersistence() {
+        #[derive(Clone, Copy)]
+        enum P {
+            Start,
+            Wait,
+            Done,
+        }
+        impl DwPhase for P {
+            fn ToPc(self) -> u32 {
+                match self {
+                    P::Start => 0,
+                    P::Wait => 1,
+                    P::Done => 2,
+                }
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                match pc {
+                    0 => Some(P::Start),
+                    1 => Some(P::Wait),
+                    2 => Some(P::Done),
+                    _ => None,
+                }
+            }
+        }
+        let root = DwFrameId {
+            Domain: 20,
+            Local: 1,
+        };
+        let act_a = DwActId {
+            Domain: 20,
+            Local: 10,
+        };
+        let act_b = DwActId {
+            Domain: 20,
+            Local: 11,
+        };
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            let act_a = DwActId {
+                Domain: 20,
+                Local: 10,
+            };
+            let act_b = DwActId {
+                Domain: 20,
+                Local: 11,
+            };
+            match ctx.Phase::<P>() {
+                Some(P::Start) => {
+                    ctx.Immediate(act_a);
+                    ctx.Immediate(act_b);
+                    ctx.Deferred(act_b, 0);
+                    Dw::WaitTicks(1, P::Wait)
+                }
+                Some(P::Wait) => Dw::Continue(P::Done),
+                Some(P::Done) => Dw::Complete(),
+                None => Dw::Fail("phase"),
+            }
+        }
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(
+            t0.ImmediateActs,
+            vec![DwActRequest { Id: act_a }, DwActRequest { Id: act_b }],
+            "immediate acts should preserve in-frame emission order"
+        );
+        assert_eq!(
+            t0.MaturedDeferredActs,
+            Vec::<DwActRequest>::new(),
+            "deferred acts should not mature in the same tick they are scheduled"
+        );
+        assert_eq!(
+            t0.PendingDeferredActs.len(),
+            1,
+            "deferred scheduling should create pending deferred state"
+        );
+        let chunk = s.ExportChunk();
+        let mut reg2 = DwFrameRegistry::New();
+        reg2.Register(DwFrameDef {
+            Id: root,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        let mut restored = DwSession::FromChunk(reg2, chunk).unwrap();
+        let t1 = restored.Tick().unwrap();
+        assert_eq!(
+            t1.MaturedDeferredActs,
+            vec![DwActRequest { Id: act_b }],
+            "deferred act scheduled at tick N with delay 0 should mature at start of tick N+1"
+        );
+        assert_eq!(
+            t1.ImmediateActs,
+            Vec::<DwActRequest>::new(),
+            "waiting tick should not invent immediate acts"
+        );
+        assert_eq!(
+            restored.Trace()[0].MaturedDeferredActs,
+            vec![DwActRequest { Id: act_b }],
+            "matured deferred acts should be included in trace entries"
         );
     }
 }

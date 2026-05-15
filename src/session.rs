@@ -3,8 +3,8 @@
 use std::fmt::Write;
 
 use crate::{
-    DwBoard, DwBoardChunk, DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwMailbox,
-    DwMailboxChunk, DwMessage, DwPhase,
+    DwActId, DwActRequest, DwBoard, DwBoardChunk, DwControl, DwControlSummary, DwDeferredAct,
+    DwFrameId, DwFrameRegistry, DwMailbox, DwMailboxChunk, DwMessage, DwPhase,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +63,9 @@ pub struct DwTickResult {
     pub Control: Option<DwControlSummary>,
     pub FailureReason: Option<&'static str>,
     pub Decisions: Vec<DwDecisionTraceEntry>,
+    pub ImmediateActs: Vec<DwActRequest>,
+    pub MaturedDeferredActs: Vec<DwActRequest>,
+    pub PendingDeferredActs: Vec<DwDeferredAct>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +81,9 @@ pub struct DwTickTraceEntry {
     pub StagedMailbox: Vec<DwMessage>,
     pub FailureReason: Option<&'static str>,
     pub Decisions: Vec<DwDecisionTraceEntry>,
+    pub ImmediateActs: Vec<DwActRequest>,
+    pub MaturedDeferredActs: Vec<DwActRequest>,
+    pub PendingDeferredActs: Vec<DwDeferredAct>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,6 +139,10 @@ pub fn FormatFrameId(frame: DwFrameId) -> String {
     format!("{}:{}", frame.Domain, frame.Local)
 }
 
+pub fn FormatActId(act: DwActId) -> String {
+    format!("{}:{}", act.Domain, act.Local)
+}
+
 pub fn FormatTraceEntry(entry: &DwTickTraceEntry) -> String {
     let mut output = String::new();
     let _ = write!(
@@ -182,6 +192,25 @@ pub fn FormatTraceEntry(entry: &DwTickTraceEntry) -> String {
             .join(", ");
         let _ = write!(output, " decisions=[{}]", decisions);
     }
+    if !entry.ImmediateActs.is_empty() || !entry.MaturedDeferredActs.is_empty() {
+        let immediate = entry
+            .ImmediateActs
+            .iter()
+            .map(|request| FormatActId(request.Id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let matured = entry
+            .MaturedDeferredActs
+            .iter()
+            .map(|request| FormatActId(request.Id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(
+            output,
+            " immediate_acts=[{}] matured_acts=[{}]",
+            immediate, matured
+        );
+    }
 
     if let Some(reason) = entry.FailureReason {
         let _ = write!(output, " failure={reason}");
@@ -228,6 +257,8 @@ pub struct DwFrameCtx<'a> {
     Mailbox: &'a mut DwMailbox,
     DecisionMemory: &'a mut Vec<DwDecisionCommitState>,
     Decisions: &'a mut Vec<DwDecisionTraceEntry>,
+    ImmediateActs: &'a mut Vec<DwActRequest>,
+    DeferredActs: &'a mut Vec<DwDeferredAct>,
 }
 impl<'a> DwFrameCtx<'a> {
     /* methods */
@@ -239,6 +270,8 @@ impl<'a> DwFrameCtx<'a> {
         mailbox: &'a mut DwMailbox,
         decision_memory: &'a mut Vec<DwDecisionCommitState>,
         decisions: &'a mut Vec<DwDecisionTraceEntry>,
+        immediate_acts: &'a mut Vec<DwActRequest>,
+        deferred_acts: &'a mut Vec<DwDeferredAct>,
     ) -> Self {
         Self {
             Frame: frame,
@@ -248,6 +281,8 @@ impl<'a> DwFrameCtx<'a> {
             Mailbox: mailbox,
             DecisionMemory: decision_memory,
             Decisions: decisions,
+            ImmediateActs: immediate_acts,
+            DeferredActs: deferred_acts,
         }
     }
     pub fn Frame(&self) -> DwFrameId {
@@ -301,6 +336,15 @@ impl<'a> DwFrameCtx<'a> {
     pub fn RecordDecision(&mut self, decision: DwDecisionTraceEntry) {
         self.Decisions.push(decision);
     }
+    pub fn Immediate(&mut self, id: DwActId) {
+        self.ImmediateActs.push(DwActRequest { Id: id });
+    }
+    pub fn Deferred(&mut self, id: DwActId, delay_ticks: u32) {
+        self.DeferredActs.push(DwDeferredAct {
+            Request: DwActRequest { Id: id },
+            DueTick: self.Tick + u64::from(delay_ticks) + 1,
+        });
+    }
 }
 
 pub struct DwSession {
@@ -315,6 +359,8 @@ pub struct DwSession {
     Mailbox: DwMailbox,
     Trace: Vec<DwTickTraceEntry>,
     DecisionMemory: Vec<DwDecisionCommitState>,
+    ImmediateActs: Vec<DwActRequest>,
+    PendingDeferredActs: Vec<DwDeferredAct>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -332,6 +378,7 @@ pub struct DwRuntimeChunk {
     pub Board: DwBoardChunk,
     pub Mailbox: DwMailboxChunk,
     pub DecisionMemory: Vec<DwDecisionCommitState>,
+    pub PendingDeferredActs: Vec<DwDeferredAct>,
 }
 
 impl DwSession {
@@ -358,16 +405,21 @@ impl DwSession {
             Mailbox: DwMailbox::New(),
             Trace: Vec::new(),
             DecisionMemory: Vec::new(),
+            ImmediateActs: Vec::new(),
+            PendingDeferredActs: Vec::new(),
         })
     }
     pub fn Tick(&mut self) -> Result<DwTickResult, &'static str> {
         let tick_now = self.Tick;
         let mut decisions = Vec::new();
+        self.ImmediateActs.clear();
+        let matured_acts = self.FlushMaturedDeferredActs(tick_now);
         let result = if self.Status == DwRunStatus::Completed || self.Status == DwRunStatus::Failed
         {
-            self.BuildResult(tick_now, None, decisions)
+            self.BuildResult(tick_now, None, decisions, matured_acts)
         } else {
             self.Mailbox.BeginTick();
+            self.Board.ClearDirty();
             if self.WaitRemaining > 0 {
                 self.WaitRemaining -= 1;
                 if self.WaitRemaining == 0 {
@@ -379,6 +431,7 @@ impl DwSession {
                         tick_now,
                         Some(DwControlSummary::WaitTicks { Ticks: 0 }),
                         decisions,
+                        matured_acts,
                     )
                 } else {
                     self.BuildResult(
@@ -387,10 +440,10 @@ impl DwSession {
                             Ticks: self.WaitRemaining,
                         }),
                         decisions,
+                        matured_acts,
                     )
                 }
             } else {
-                self.Board.ClearDirty();
                 let active = self.Stack.last().copied().ok_or("runtime stack empty")?;
                 let frame = self
                     .Registry
@@ -404,10 +457,17 @@ impl DwSession {
                     &mut self.Mailbox,
                     &mut self.DecisionMemory,
                     &mut decisions,
+                    &mut self.ImmediateActs,
+                    &mut self.PendingDeferredActs,
                 );
                 let control = (frame.Step)(&mut ctx);
                 self.ApplyControl(control);
-                self.BuildResult(tick_now, Some(Self::Summarize(control)), decisions)
+                self.BuildResult(
+                    tick_now,
+                    Some(Self::Summarize(control)),
+                    decisions,
+                    matured_acts,
+                )
             }
         };
         self.Trace.push(Self::TraceFromResult(&result));
@@ -427,6 +487,9 @@ impl DwSession {
             StagedMailbox: result.StagedMailbox.clone(),
             FailureReason: result.FailureReason,
             Decisions: result.Decisions.clone(),
+            ImmediateActs: result.ImmediateActs.clone(),
+            MaturedDeferredActs: result.MaturedDeferredActs.clone(),
+            PendingDeferredActs: result.PendingDeferredActs.clone(),
         }
     }
     pub fn Trace(&self) -> &[DwTickTraceEntry] {
@@ -457,6 +520,7 @@ impl DwSession {
             Board: self.Board.ExportChunk(),
             Mailbox: self.Mailbox.ExportChunk(),
             DecisionMemory: self.DecisionMemory.clone(),
+            PendingDeferredActs: self.PendingDeferredActs.clone(),
         }
     }
     pub fn FromChunk(
@@ -480,6 +544,8 @@ impl DwSession {
             Mailbox: DwMailbox::FromChunk(chunk.Mailbox),
             Trace: Vec::new(),
             DecisionMemory: chunk.DecisionMemory,
+            ImmediateActs: Vec::new(),
+            PendingDeferredActs: chunk.PendingDeferredActs,
         })
     }
     fn ApplyControl(&mut self, control: DwControl) {
@@ -545,6 +611,7 @@ impl DwSession {
         tick_now: u64,
         control: Option<DwControlSummary>,
         decisions: Vec<DwDecisionTraceEntry>,
+        matured_acts: Vec<DwActRequest>,
     ) -> DwTickResult {
         if self.Status == DwRunStatus::Waiting && self.WaitRemaining == 0 {
             self.Status = DwRunStatus::Running;
@@ -567,7 +634,23 @@ impl DwSession {
             VisibleMailbox: self.Mailbox.VisibleSnapshot(),
             StagedMailbox: self.Mailbox.StagedSnapshot(),
             Decisions: decisions,
+            ImmediateActs: self.ImmediateActs.clone(),
+            MaturedDeferredActs: matured_acts,
+            PendingDeferredActs: self.PendingDeferredActs.clone(),
         }
+    }
+    fn FlushMaturedDeferredActs(&mut self, tick_now: u64) -> Vec<DwActRequest> {
+        let mut matured = Vec::new();
+        let mut remaining = Vec::new();
+        for deferred in &self.PendingDeferredActs {
+            if deferred.DueTick <= tick_now {
+                matured.push(deferred.Request);
+            } else {
+                remaining.push(*deferred);
+            }
+        }
+        self.PendingDeferredActs = remaining;
+        matured
     }
     fn Summarize(control: DwControl) -> DwControlSummary {
         match control {
