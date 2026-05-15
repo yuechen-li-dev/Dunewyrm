@@ -8,13 +8,15 @@ mod phase;
 mod registry;
 mod session;
 
-pub use board::{DwBoard, DwBoardKind, DwBoardValue, DwKey, DwSlotCollision};
+pub use board::{DwBoard, DwBoardChunk, DwBoardKind, DwBoardValue, DwKey, DwSlotCollision};
 pub use control::{Dw, DwControl, DwControlSummary};
 pub use ids::DwFrameId;
-pub use mailbox::{DwMailbox, DwMessage};
+pub use mailbox::{DwMailbox, DwMailboxChunk, DwMessage};
 pub use phase::DwPhase;
 pub use registry::{DwFrameDef, DwFrameFn, DwFrameRegistry};
-pub use session::{DwFrameCtx, DwRunStatus, DwRuntimeFrame, DwSession, DwTickResult};
+pub use session::{
+    DwFrameCtx, DwRunStatus, DwRuntimeChunk, DwRuntimeFrame, DwSession, DwTickResult, DwWaitChunk,
+};
 
 pub fn ProjectName() -> &'static str {
     "Dunewyrm"
@@ -577,6 +579,164 @@ mod tests {
             t1.StagedMailbox,
             Vec::<DwMessage>::new(),
             "expected staged queue to be empty immediately after promotion"
+        );
+    }
+
+    #[test]
+    fn RuntimeChunkRoundTripPreservesStateAndSupportsResume() {
+        #[derive(Clone, Copy)]
+        enum P {
+            Start,
+            Wait,
+            Finish,
+        }
+        impl DwPhase for P {
+            fn ToPc(self) -> u32 {
+                match self {
+                    P::Start => 0,
+                    P::Wait => 1,
+                    P::Finish => 2,
+                }
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                match pc {
+                    0 => Some(P::Start),
+                    1 => Some(P::Wait),
+                    2 => Some(P::Finish),
+                    _ => None,
+                }
+            }
+        }
+
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            match ctx.Phase::<P>() {
+                Some(P::Start) => {
+                    ctx.BoardMut().Set(Keys::Alerted, true).unwrap();
+                    ctx.BoardMut().Set(Keys::Count, 5).unwrap();
+                    ctx.BoardMut().Set(Keys::Pressure, 0.5).unwrap();
+                    ctx.MailboxMut().Enqueue(DwMessage { Kind: 2, Value: 20 });
+                    Dw::WaitTicks(2, P::Wait)
+                }
+                Some(P::Wait) => {
+                    ctx.BoardMut().Set(Keys::Count, 8).unwrap();
+                    Dw::Continue(P::Finish)
+                }
+                Some(P::Finish) => Dw::Complete(),
+                None => Dw::Fail("phase"),
+            }
+        }
+
+        let root = DwFrameId {
+            Domain: 6,
+            Local: 1,
+        };
+        let mut reg_a = DwFrameRegistry::New();
+        reg_a
+            .Register(DwFrameDef {
+                Id: root,
+                Step: RootF,
+                DebugName: "Root",
+            })
+            .unwrap();
+        let mut uninterrupted = DwSession::New(reg_a, root, 0).unwrap();
+        let mut final_uninterrupted = uninterrupted.Tick().unwrap();
+        for _ in 0..4 {
+            final_uninterrupted = uninterrupted.Tick().unwrap();
+        }
+
+        let mut reg_b = DwFrameRegistry::New();
+        reg_b
+            .Register(DwFrameDef {
+                Id: root,
+                Step: RootF,
+                DebugName: "Root",
+            })
+            .unwrap();
+        let mut split = DwSession::New(reg_b, root, 0).unwrap();
+        let first = split.Tick().unwrap();
+        assert_eq!(
+            first.Status,
+            DwRunStatus::Waiting,
+            "expected first tick to enter waiting before chunk export"
+        );
+        let chunk = split.ExportChunk();
+        assert_eq!(
+            chunk.Board.DirtySlots,
+            vec![1, 2, 3],
+            "expected chunk to preserve board dirty slots at export boundary"
+        );
+        assert_eq!(
+            chunk.Mailbox.Staged,
+            vec![DwMessage { Kind: 2, Value: 20 }],
+            "expected staged mailbox queue to be preserved in exported chunk"
+        );
+
+        let mut reg_c = DwFrameRegistry::New();
+        reg_c
+            .Register(DwFrameDef {
+                Id: root,
+                Step: RootF,
+                DebugName: "Root",
+            })
+            .unwrap();
+        let mut restored = DwSession::FromChunk(reg_c, chunk.clone()).unwrap();
+        assert_eq!(
+            restored.ExportChunk(),
+            chunk,
+            "expected immediate re-export after restore to match original exported chunk"
+        );
+
+        let mut final_restored = restored.Tick().unwrap();
+        for _ in 0..3 {
+            final_restored = restored.Tick().unwrap();
+        }
+
+        assert_eq!(
+            final_restored.Status, final_uninterrupted.Status,
+            "restored session should preserve terminal status across chunk import"
+        );
+        assert_eq!(
+            final_restored.Tick, final_uninterrupted.Tick,
+            "restored session should preserve tick progression equivalence"
+        );
+        assert_eq!(
+            restored.ExportChunk().Stack,
+            uninterrupted.ExportChunk().Stack,
+            "restored session should preserve final stack shape equivalence"
+        );
+        assert_eq!(
+            restored.ExportChunk().Board,
+            uninterrupted.ExportChunk().Board,
+            "restored session should preserve final board state equivalence"
+        );
+        assert_eq!(
+            restored.ExportChunk().Mailbox,
+            uninterrupted.ExportChunk().Mailbox,
+            "restored session should preserve final mailbox state equivalence"
+        );
+    }
+
+    #[test]
+    fn ChunkRestoreFailsWhenRegistryIsMissingFrame() {
+        let root = DwFrameId {
+            Domain: 7,
+            Local: 1,
+        };
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: |_| Dw::Complete(),
+            DebugName: "Root",
+        })
+        .unwrap();
+        let session = DwSession::New(reg, root, 0).unwrap();
+        let chunk = session.ExportChunk();
+
+        let empty_reg = DwFrameRegistry::New();
+        let restored = DwSession::FromChunk(empty_reg, chunk);
+        assert!(
+            matches!(restored, Err("chunk stack frame not found in registry")),
+            "expected clear restore error when chunk stack references missing frame IDs"
         );
     }
 }
