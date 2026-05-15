@@ -1,17 +1,20 @@
 # AGENTS.md
 
-## Naming
+## Project identity
 
-Use CamelCase for Dunewyrm public and author-facing functions.
+Dunewyrm is a Rust control-kernel project in the Dominatus / DragonGod / Dreadfang family.
 
-Do not convert function names to Rust `snake_case`. Dunewyrm is part of a cross-language control-kernel family, and naming consistency across Dominatus, DragonGod, Dreadfang, and future generated backends is more important than local Rust style convention.
+Pre-M0 is scaffold-and-contract only. Do not implement runtime features during Pre-M0.
 
-Rust’s `non_snake_case` lint should be disabled where needed:
+## Naming convention
 
-```rust
-#![allow(non_snake_case)]
-```
-when needed. This is intentional, not a temporary suppression.
+Dunewyrm intentionally uses CamelCase for public and author-facing functions.
+
+Do not rewrite function names into Rust-style `snake_case`. This project is part of the Dominatus / DragonGod / Dreadfang control-kernel family, and cross-language naming consistency is a project requirement.
+
+Use `#![allow(non_snake_case)]` where needed. Treat that lint suppression as intentional, not temporary.
+
+Rust naming conventions are useful defaults, but they are not semantic requirements. Dunewyrm prioritizes consistency with the surrounding control-runtime family over local idiomatic naming style.
 
 ## Primer
 
@@ -22,6 +25,14 @@ Do not write code that conflicts with them.
 Do not substitute your own preferred style for the primer rules.
 
 If instructions and primers appear to disagree, surface the conflict explicitly.
+
+## Runtime-shape guardrails
+
+- Avoid async in early runtime work.
+- Avoid nightly and proc-macro machinery in early runtime work.
+- Avoid over-generic and lifetime-heavy architecture.
+- Prefer explicit owned runtime state and explicit control flow.
+- Use Cargo tests for behavior validation.
 
 ## Convergence rule
 
