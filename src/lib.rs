@@ -3,6 +3,7 @@
 mod board;
 mod control;
 mod ids;
+mod mailbox;
 mod phase;
 mod registry;
 mod session;
@@ -10,6 +11,7 @@ mod session;
 pub use board::{DwBoard, DwBoardKind, DwBoardValue, DwKey, DwSlotCollision};
 pub use control::{Dw, DwControl, DwControlSummary};
 pub use ids::DwFrameId;
+pub use mailbox::{DwMailbox, DwMessage};
 pub use phase::DwPhase;
 pub use registry::{DwFrameDef, DwFrameFn, DwFrameRegistry};
 pub use session::{DwFrameCtx, DwRunStatus, DwRuntimeFrame, DwSession, DwTickResult};
@@ -433,5 +435,148 @@ mod tests {
         let t2 = s.Tick().unwrap();
         assert_eq!(t2.DirtySlots, Vec::<u32>::new());
         assert_eq!(s.Board().TryGet(Keys::Count), Some(11));
+    }
+
+    #[test]
+    fn MailboxEmptyPeekConsumeAndFifoBehavior() {
+        let mut mailbox = DwMailbox::New();
+        assert_eq!(
+            mailbox.PeekFront(),
+            None,
+            "expected empty mailbox peek to return None before any seeding"
+        );
+        assert_eq!(
+            mailbox.ConsumeFront(),
+            None,
+            "expected empty mailbox consume to return None before any seeding"
+        );
+
+        mailbox.EnqueueVisibleForTest(DwMessage { Kind: 1, Value: 11 });
+        mailbox.EnqueueVisibleForTest(DwMessage { Kind: 2, Value: 22 });
+        assert_eq!(
+            mailbox.PeekFront(),
+            Some(DwMessage { Kind: 1, Value: 11 }),
+            "expected peek to show the front visible message without consuming it"
+        );
+        assert_eq!(
+            mailbox.ConsumeFront(),
+            Some(DwMessage { Kind: 1, Value: 11 }),
+            "expected consume to remove the earliest visible message first (FIFO)"
+        );
+        assert_eq!(
+            mailbox.ConsumeFront(),
+            Some(DwMessage { Kind: 2, Value: 22 }),
+            "expected consume to continue preserving FIFO order"
+        );
+    }
+
+    #[test]
+    fn MailboxStagingBoundaryAndWaitPromotionAreDeterministic() {
+        #[derive(Clone, Copy)]
+        enum P {
+            Start,
+            Check,
+            Done,
+        }
+        impl DwPhase for P {
+            fn ToPc(self) -> u32 {
+                match self {
+                    P::Start => 0,
+                    P::Check => 1,
+                    P::Done => 2,
+                }
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                match pc {
+                    0 => Some(P::Start),
+                    1 => Some(P::Check),
+                    2 => Some(P::Done),
+                    _ => None,
+                }
+            }
+        }
+
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            match ctx.Phase::<P>() {
+                Some(P::Start) => {
+                    let before = ctx.Mailbox().PeekFront();
+                    assert_eq!(
+                        before,
+                        Some(DwMessage { Kind: 7, Value: 70 }),
+                        "expected seeded visible message to be readable at start phase"
+                    );
+                    ctx.MailboxMut().Enqueue(DwMessage { Kind: 8, Value: 80 });
+                    let same_tick = ctx.Mailbox().PeekFront();
+                    assert_eq!(
+                        same_tick,
+                        Some(DwMessage { Kind: 7, Value: 70 }),
+                        "expected staged message to remain invisible during same tick"
+                    );
+                    Dw::WaitTicks(1, P::Check)
+                }
+                Some(P::Check) => {
+                    let consumed = ctx.MailboxMut().ConsumeFront();
+                    assert_eq!(
+                        consumed,
+                        Some(DwMessage { Kind: 7, Value: 70 }),
+                        "expected old visible message to stay available until explicitly consumed"
+                    );
+                    let promoted = ctx.Mailbox().PeekFront();
+                    assert_eq!(
+                        promoted,
+                        Some(DwMessage { Kind: 8, Value: 80 }),
+                        "expected staged message to promote at tick boundary while wait elapsed"
+                    );
+                    Dw::Continue(P::Done)
+                }
+                Some(P::Done) => Dw::Complete(),
+                None => Dw::Fail("bad phase"),
+            }
+        }
+
+        let root = DwFrameId {
+            Domain: 5,
+            Local: 1,
+        };
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        s.MailboxMut()
+            .EnqueueVisibleForTest(DwMessage { Kind: 7, Value: 70 });
+        let t0 = s.Tick().unwrap();
+        assert_eq!(
+            t0.VisibleMailbox,
+            vec![DwMessage { Kind: 7, Value: 70 }],
+            "expected visible snapshot to keep unconsumed visible message after start tick"
+        );
+        assert_eq!(
+            t0.StagedMailbox,
+            vec![DwMessage { Kind: 8, Value: 80 }],
+            "expected staged snapshot to include message enqueued during tick"
+        );
+        let t1 = s.Tick().unwrap();
+        assert_eq!(
+            t1.Status,
+            DwRunStatus::Running,
+            "expected wait countdown tick to return running after wait reaches zero"
+        );
+        assert_eq!(
+            t1.VisibleMailbox,
+            vec![
+                DwMessage { Kind: 7, Value: 70 },
+                DwMessage { Kind: 8, Value: 80 }
+            ],
+            "expected staged message promotion at tick boundary to preserve FIFO behind existing visible messages"
+        );
+        assert_eq!(
+            t1.StagedMailbox,
+            Vec::<DwMessage>::new(),
+            "expected staged queue to be empty immediately after promotion"
+        );
     }
 }

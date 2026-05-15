@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M3)
+# Dunewyrm Architecture Contract (M4)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -41,3 +41,13 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - Dirty tracking is automatic for successful writes and reset at tick start.
 - Slot collisions are diagnosed when a slot is reused with different name or type.
 - Board is control working memory only, not a generic object store and not persistence.
+
+## M4 mailbox visible/staged semantics
+
+- Session-owned mailbox has deterministic FIFO visible and staged queues.
+- `BeginTick` promotes staged messages into visible before wait processing or frame execution.
+- Frame code reads and mutates mailbox through `DwFrameCtx` (`Mailbox` / `MailboxMut`).
+- `Enqueue` during a tick appends only to staged, never to same-tick visible reads.
+- Visible messages remain in FIFO order until consumed.
+- Mailbox is synchronous runtime state only: no async/event loop machinery.
+- Mailbox persistence is not implemented in M4 and is deferred to M5.

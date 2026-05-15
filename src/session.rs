@@ -1,7 +1,8 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    DwBoard, DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwPhase, DwSlotCollision,
+    DwBoard, DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwMailbox, DwMessage,
+    DwPhase, DwSlotCollision,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,6 +22,8 @@ pub struct DwRuntimeFrame {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DwTickResult {
     pub DirtySlots: Vec<u32>,
+    pub VisibleMailbox: Vec<DwMessage>,
+    pub StagedMailbox: Vec<DwMessage>,
     pub Tick: u64,
     pub Status: DwRunStatus,
     pub Frame: Option<DwFrameId>,
@@ -36,15 +39,23 @@ pub struct DwFrameCtx<'a> {
     Pc: u32,
     Tick: u64,
     Board: &'a mut DwBoard,
+    Mailbox: &'a mut DwMailbox,
 }
 
 impl<'a> DwFrameCtx<'a> {
-    pub fn New(frame: DwFrameId, pc: u32, tick: u64, board: &'a mut DwBoard) -> Self {
+    pub fn New(
+        frame: DwFrameId,
+        pc: u32,
+        tick: u64,
+        board: &'a mut DwBoard,
+        mailbox: &'a mut DwMailbox,
+    ) -> Self {
         Self {
             Frame: frame,
             Pc: pc,
             Tick: tick,
             Board: board,
+            Mailbox: mailbox,
         }
     }
 
@@ -66,6 +77,12 @@ impl<'a> DwFrameCtx<'a> {
     pub fn BoardMut(&mut self) -> &mut DwBoard {
         self.Board
     }
+    pub fn Mailbox(&self) -> &DwMailbox {
+        self.Mailbox
+    }
+    pub fn MailboxMut(&mut self) -> &mut DwMailbox {
+        self.Mailbox
+    }
 }
 
 pub struct DwSession {
@@ -77,6 +94,7 @@ pub struct DwSession {
     Status: DwRunStatus,
     FailureReason: Option<&'static str>,
     Board: DwBoard,
+    Mailbox: DwMailbox,
 }
 
 impl DwSession {
@@ -100,6 +118,7 @@ impl DwSession {
             Status: DwRunStatus::Running,
             FailureReason: None,
             Board: DwBoard::New(),
+            Mailbox: DwMailbox::New(),
         })
     }
 
@@ -110,6 +129,8 @@ impl DwSession {
             self.Tick += 1;
             return Ok(r);
         }
+
+        self.Mailbox.BeginTick();
 
         if self.WaitRemaining > 0 {
             self.WaitRemaining -= 1;
@@ -139,7 +160,13 @@ impl DwSession {
             .Registry
             .Find(active.Id)
             .ok_or("active frame missing")?;
-        let mut ctx = DwFrameCtx::New(active.Id, active.Pc, tick_now, &mut self.Board);
+        let mut ctx = DwFrameCtx::New(
+            active.Id,
+            active.Pc,
+            tick_now,
+            &mut self.Board,
+            &mut self.Mailbox,
+        );
         let control = (frame.Step)(&mut ctx);
         self.ApplyControl(control);
         let r = self.BuildResult(tick_now, Some(Self::Summarize(control)));
@@ -226,6 +253,8 @@ impl DwSession {
             Control: control,
             FailureReason: self.FailureReason,
             DirtySlots: self.Board.DirtySlots(),
+            VisibleMailbox: self.Mailbox.VisibleSnapshot(),
+            StagedMailbox: self.Mailbox.StagedSnapshot(),
         }
     }
 
@@ -254,5 +283,13 @@ impl DwSession {
 
     pub fn LastBoardSlotCollision(&self) -> Option<DwSlotCollision> {
         self.Board.LastSlotCollision()
+    }
+
+    pub fn Mailbox(&self) -> &DwMailbox {
+        &self.Mailbox
+    }
+
+    pub fn MailboxMut(&mut self) -> &mut DwMailbox {
+        &mut self.Mailbox
     }
 }
