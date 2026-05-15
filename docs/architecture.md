@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M6)
+# Dunewyrm Architecture Contract (M7)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -67,3 +67,14 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - `CompareTrace` reports first mismatch index and reason, including expected/actual entries when available.
 - Formatting helpers (`FormatTraceEntry`, `FormatTrace`, `FormatComparison`) are diagnostics only.
 - No trace file artifact writer or serde serialization is added in M6.
+
+
+## M7 utility decisions
+
+- Decision authoring remains explicit (`Dw::When`, `Dw::Decide`) with plain scorer function pointers.
+- Scores clamp to `[0,1]` before ranking.
+- Tie-break, min-commit, and hysteresis provide anti-thrashing arbitration.
+- Decision helper pushes selected child and resumes parent at the same PC on later ticks (decision tick is real).
+- Utility commitment memory is runtime-owned, keyed by frame+PC, and persisted through chunk export/import.
+- Tick traces include structured decision entries for deterministic diagnostics.
+- M7 still does not include actuation.

@@ -8,6 +8,34 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DwDecisionKey {
+    pub Frame: DwFrameId,
+    pub Pc: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DwDecisionCommitState {
+    pub Frame: DwFrameId,
+    pub Pc: u32,
+    pub Target: DwFrameId,
+    pub Age: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DwDecisionTraceEntry {
+    pub Tick: u64,
+    pub Frame: DwFrameId,
+    pub Pc: u32,
+    pub Candidates: Vec<(DwFrameId, f32)>,
+    pub RawWinner: DwFrameId,
+    pub Selected: DwFrameId,
+    pub TieBreakApplied: bool,
+    pub MinCommitApplied: bool,
+    pub HysteresisApplied: bool,
+    pub CommitAge: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DwRunStatus {
     Running,
     Waiting,
@@ -21,7 +49,7 @@ pub struct DwRuntimeFrame {
     pub Pc: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DwTickResult {
     pub DirtySlots: Vec<u32>,
     pub VisibleMailbox: Vec<DwMessage>,
@@ -34,9 +62,10 @@ pub struct DwTickResult {
     pub StackDepth: usize,
     pub Control: Option<DwControlSummary>,
     pub FailureReason: Option<&'static str>,
+    pub Decisions: Vec<DwDecisionTraceEntry>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DwTickTraceEntry {
     pub Tick: u64,
     pub Status: DwRunStatus,
@@ -48,9 +77,10 @@ pub struct DwTickTraceEntry {
     pub VisibleMailbox: Vec<DwMessage>,
     pub StagedMailbox: Vec<DwMessage>,
     pub FailureReason: Option<&'static str>,
+    pub Decisions: Vec<DwDecisionTraceEntry>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DwTraceComparison {
     pub Matches: bool,
     pub FirstMismatchIndex: Option<usize>,
@@ -134,6 +164,24 @@ pub fn FormatTraceEntry(entry: &DwTickTraceEntry) -> String {
         " visible={:?} staged={:?}",
         entry.VisibleMailbox, entry.StagedMailbox
     );
+    if !entry.Decisions.is_empty() {
+        let decisions = entry
+            .Decisions
+            .iter()
+            .map(|decision| {
+                format!(
+                    "{}@{} raw={} selected={} age={}",
+                    FormatFrameId(decision.Frame),
+                    decision.Pc,
+                    FormatFrameId(decision.RawWinner),
+                    FormatFrameId(decision.Selected),
+                    decision.CommitAge
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(output, " decisions=[{}]", decisions);
+    }
 
     if let Some(reason) = entry.FailureReason {
         let _ = write!(output, " failure={reason}");
@@ -178,6 +226,8 @@ pub struct DwFrameCtx<'a> {
     Tick: u64,
     Board: &'a mut DwBoard,
     Mailbox: &'a mut DwMailbox,
+    DecisionMemory: &'a mut Vec<DwDecisionCommitState>,
+    Decisions: &'a mut Vec<DwDecisionTraceEntry>,
 }
 impl<'a> DwFrameCtx<'a> {
     /* methods */
@@ -187,6 +237,8 @@ impl<'a> DwFrameCtx<'a> {
         tick: u64,
         board: &'a mut DwBoard,
         mailbox: &'a mut DwMailbox,
+        decision_memory: &'a mut Vec<DwDecisionCommitState>,
+        decisions: &'a mut Vec<DwDecisionTraceEntry>,
     ) -> Self {
         Self {
             Frame: frame,
@@ -194,6 +246,8 @@ impl<'a> DwFrameCtx<'a> {
             Tick: tick,
             Board: board,
             Mailbox: mailbox,
+            DecisionMemory: decision_memory,
+            Decisions: decisions,
         }
     }
     pub fn Frame(&self) -> DwFrameId {
@@ -220,6 +274,33 @@ impl<'a> DwFrameCtx<'a> {
     pub fn MailboxMut(&mut self) -> &mut DwMailbox {
         self.Mailbox
     }
+    pub fn DecisionKey(&self) -> DwDecisionKey {
+        DwDecisionKey {
+            Frame: self.Frame,
+            Pc: self.Pc,
+        }
+    }
+    pub fn FindDecisionMemoryIndex(&self, key: DwDecisionKey) -> Option<usize> {
+        self.DecisionMemory
+            .iter()
+            .position(|state| state.Frame == key.Frame && state.Pc == key.Pc)
+    }
+    pub fn DecisionMemoryAt(&self, index: usize) -> DwDecisionCommitState {
+        self.DecisionMemory[index]
+    }
+    pub fn UpsertDecisionMemory(&mut self, next: DwDecisionCommitState) {
+        if let Some(index) = self.FindDecisionMemoryIndex(DwDecisionKey {
+            Frame: next.Frame,
+            Pc: next.Pc,
+        }) {
+            self.DecisionMemory[index] = next;
+        } else {
+            self.DecisionMemory.push(next);
+        }
+    }
+    pub fn RecordDecision(&mut self, decision: DwDecisionTraceEntry) {
+        self.Decisions.push(decision);
+    }
 }
 
 pub struct DwSession {
@@ -233,6 +314,7 @@ pub struct DwSession {
     Board: DwBoard,
     Mailbox: DwMailbox,
     Trace: Vec<DwTickTraceEntry>,
+    DecisionMemory: Vec<DwDecisionCommitState>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -249,6 +331,7 @@ pub struct DwRuntimeChunk {
     pub Stack: Vec<DwRuntimeFrame>,
     pub Board: DwBoardChunk,
     pub Mailbox: DwMailboxChunk,
+    pub DecisionMemory: Vec<DwDecisionCommitState>,
 }
 
 impl DwSession {
@@ -274,13 +357,15 @@ impl DwSession {
             Board: DwBoard::New(),
             Mailbox: DwMailbox::New(),
             Trace: Vec::new(),
+            DecisionMemory: Vec::new(),
         })
     }
     pub fn Tick(&mut self) -> Result<DwTickResult, &'static str> {
         let tick_now = self.Tick;
+        let mut decisions = Vec::new();
         let result = if self.Status == DwRunStatus::Completed || self.Status == DwRunStatus::Failed
         {
-            self.BuildResult(tick_now, None)
+            self.BuildResult(tick_now, None, decisions)
         } else {
             self.Mailbox.BeginTick();
             if self.WaitRemaining > 0 {
@@ -290,13 +375,18 @@ impl DwSession {
                         top.Pc = self.WaitResumePc.expect("wait resume pc should be set");
                     }
                     self.WaitResumePc = None;
-                    self.BuildResult(tick_now, Some(DwControlSummary::WaitTicks { Ticks: 0 }))
+                    self.BuildResult(
+                        tick_now,
+                        Some(DwControlSummary::WaitTicks { Ticks: 0 }),
+                        decisions,
+                    )
                 } else {
                     self.BuildResult(
                         tick_now,
                         Some(DwControlSummary::WaitTicks {
                             Ticks: self.WaitRemaining,
                         }),
+                        decisions,
                     )
                 }
             } else {
@@ -312,10 +402,12 @@ impl DwSession {
                     tick_now,
                     &mut self.Board,
                     &mut self.Mailbox,
+                    &mut self.DecisionMemory,
+                    &mut decisions,
                 );
                 let control = (frame.Step)(&mut ctx);
                 self.ApplyControl(control);
-                self.BuildResult(tick_now, Some(Self::Summarize(control)))
+                self.BuildResult(tick_now, Some(Self::Summarize(control)), decisions)
             }
         };
         self.Trace.push(Self::TraceFromResult(&result));
@@ -334,6 +426,7 @@ impl DwSession {
             VisibleMailbox: result.VisibleMailbox.clone(),
             StagedMailbox: result.StagedMailbox.clone(),
             FailureReason: result.FailureReason,
+            Decisions: result.Decisions.clone(),
         }
     }
     pub fn Trace(&self) -> &[DwTickTraceEntry] {
@@ -341,6 +434,9 @@ impl DwSession {
     }
     pub fn Board(&self) -> &DwBoard {
         &self.Board
+    }
+    pub fn BoardMut(&mut self) -> &mut DwBoard {
+        &mut self.Board
     }
     pub fn Mailbox(&self) -> &DwMailbox {
         &self.Mailbox
@@ -360,6 +456,7 @@ impl DwSession {
             Stack: self.Stack.clone(),
             Board: self.Board.ExportChunk(),
             Mailbox: self.Mailbox.ExportChunk(),
+            DecisionMemory: self.DecisionMemory.clone(),
         }
     }
     pub fn FromChunk(
@@ -382,6 +479,7 @@ impl DwSession {
             Board: DwBoard::FromChunk(chunk.Board),
             Mailbox: DwMailbox::FromChunk(chunk.Mailbox),
             Trace: Vec::new(),
+            DecisionMemory: chunk.DecisionMemory,
         })
     }
     fn ApplyControl(&mut self, control: DwControl) {
@@ -442,7 +540,12 @@ impl DwSession {
         self.Status = DwRunStatus::Failed;
         self.FailureReason = Some(reason);
     }
-    fn BuildResult(&mut self, tick_now: u64, control: Option<DwControlSummary>) -> DwTickResult {
+    fn BuildResult(
+        &mut self,
+        tick_now: u64,
+        control: Option<DwControlSummary>,
+        decisions: Vec<DwDecisionTraceEntry>,
+    ) -> DwTickResult {
         if self.Status == DwRunStatus::Waiting && self.WaitRemaining == 0 {
             self.Status = DwRunStatus::Running;
         }
@@ -463,6 +566,7 @@ impl DwSession {
             DirtySlots: self.Board.DirtySlots(),
             VisibleMailbox: self.Mailbox.VisibleSnapshot(),
             StagedMailbox: self.Mailbox.StagedSnapshot(),
+            Decisions: decisions,
         }
     }
     fn Summarize(control: DwControl) -> DwControlSummary {

@@ -6,7 +6,7 @@ Dunewyrm is the Rust control-kernel sibling of the Dominatus / DragonGod family.
 
 - A Rust-native expression of the same execution-model truths used in the family runtimes.
 - A project that prioritizes explicit state, explicit progression, deterministic behavior, and testability.
-- Currently in **M4 mailbox visible/staged runtime**.
+- Currently in **M7 utility decisions with hysteresis/min-commit runtime**.
 
 ## What Dunewyrm is not
 
@@ -41,3 +41,13 @@ This repository currently contains:
 ```bash
 cargo test
 ```
+
+
+## M7 utility decisions
+
+- Authoring uses plain scorer functions (`DwScoreFn`) with explicit candidates via `Dw::When`.
+- `Dw::Decide` clamps scores into `[0,1]`, applies tie-break, min-commit, and hysteresis deterministically.
+- The decision tick is real: selected child is pushed and starts on a later tick, and parent resumes the same PC after child return.
+- Utility commitment memory is runtime-owned, keyed by frame+PC, and persisted in runtime chunks.
+- Decision records are included in tick results and tick trace entries for inspection.
+- No actuation is added yet in M7.

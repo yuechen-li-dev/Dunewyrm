@@ -9,15 +9,17 @@ mod registry;
 mod session;
 
 pub use board::{DwBoard, DwBoardChunk, DwBoardKind, DwBoardValue, DwKey, DwSlotCollision};
-pub use control::{Dw, DwControl, DwControlSummary};
+pub use control::{
+    Dw, DwControl, DwControlSummary, DwDecideOptions, DwScoreFn, DwTieBreak, DwUtilityCandidate,
+};
 pub use ids::DwFrameId;
 pub use mailbox::{DwMailbox, DwMailboxChunk, DwMessage};
 pub use phase::DwPhase;
 pub use registry::{DwFrameDef, DwFrameFn, DwFrameRegistry};
 pub use session::{
-    CompareTrace, DwFrameCtx, DwRunStatus, DwRuntimeChunk, DwRuntimeFrame, DwSession, DwTickResult,
-    DwTickTraceEntry, DwTraceComparison, DwWaitChunk, FormatComparison, FormatTrace,
-    FormatTraceEntry,
+    CompareTrace, DwDecisionCommitState, DwDecisionKey, DwDecisionTraceEntry, DwFrameCtx,
+    DwRunStatus, DwRuntimeChunk, DwRuntimeFrame, DwSession, DwTickResult, DwTickTraceEntry,
+    DwTraceComparison, DwWaitChunk, FormatComparison, FormatTrace, FormatTraceEntry,
 };
 
 pub fn ProjectName() -> &'static str {
@@ -816,6 +818,7 @@ mod tests {
             VisibleMailbox: vec![],
             StagedMailbox: vec![],
             FailureReason: None,
+            Decisions: vec![],
         }];
         let same = expected.clone();
         let matching = CompareTrace(&expected, &same);
@@ -924,6 +927,578 @@ mod tests {
         assert!(
             FormatTrace(uninterrupted.Trace()).contains("9:1"),
             "formatted trace should contain deterministic domain:local frame IDs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod m7_tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum RootPhase {
+        Decide,
+    }
+    impl DwPhase for RootPhase {
+        fn ToPc(self) -> u32 {
+            0
+        }
+        fn FromPc(pc: u32) -> Option<Self> {
+            if pc == 0 { Some(Self::Decide) } else { None }
+        }
+    }
+
+    mod Keys {
+        use crate::DwKey;
+        pub const Recover: DwKey<bool> = DwKey::New("Recover", 50);
+    }
+
+    fn RecoverScore(ctx: &DwFrameCtx) -> f32 {
+        if ctx.Board().GetOr(Keys::Recover, false) {
+            1.5
+        } else {
+            -0.1
+        }
+    }
+    fn PatrolScore(_ctx: &DwFrameCtx) -> f32 {
+        0.5
+    }
+
+    fn ChildPop(_ctx: &mut DwFrameCtx) -> DwControl {
+        Dw::Pop()
+    }
+
+    fn BuildRegistry(root_step: DwFrameFn) -> (DwFrameRegistry, DwFrameId, DwFrameId, DwFrameId) {
+        let root = DwFrameId {
+            Domain: 10,
+            Local: 1,
+        };
+        let recover = DwFrameId {
+            Domain: 10,
+            Local: 2,
+        };
+        let patrol = DwFrameId {
+            Domain: 10,
+            Local: 3,
+        };
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: root_step,
+            DebugName: "Root",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: recover,
+            Step: ChildPop,
+            DebugName: "Recover",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: patrol,
+            Step: ChildPop,
+            DebugName: "Patrol",
+        })
+        .unwrap();
+        (reg, root, recover, patrol)
+    }
+
+    #[test]
+    fn DecideClampsScoresAndPushesWinner() {
+        fn Root(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 2,
+                        },
+                        RecoverScore,
+                    ),
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 3,
+                        },
+                        PatrolScore,
+                    ),
+                ],
+                DwDecideOptions {
+                    Hysteresis: 0.1,
+                    MinCommitTicks: 0,
+                    TieBreak: DwTieBreak::First,
+                },
+            )
+        }
+        let root = DwFrameId {
+            Domain: 10,
+            Local: 1,
+        };
+        let recover = DwFrameId {
+            Domain: 10,
+            Local: 2,
+        };
+        let patrol = DwFrameId {
+            Domain: 10,
+            Local: 3,
+        };
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: Root,
+            DebugName: "Root",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: recover,
+            Step: ChildPop,
+            DebugName: "Recover",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: patrol,
+            Step: ChildPop,
+            DebugName: "Patrol",
+        })
+        .unwrap();
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        s.BoardMut().Set(Keys::Recover, true).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(
+            t0.Control,
+            Some(DwControlSummary::Push),
+            "decide should push selected child on decision tick"
+        );
+        assert_eq!(
+            t0.Frame,
+            Some(recover),
+            "highest clamped score should win when recover score clamps to 1.0"
+        );
+        assert_eq!(
+            t0.Decisions[0].Candidates[0].1, 1.0,
+            "recover score above 1.0 should clamp to 1.0"
+        );
+        assert_eq!(
+            t0.Decisions[0].Candidates[1].1, 0.5,
+            "patrol score should remain unchanged when already in range"
+        );
+        assert_eq!(
+            t0.StackDepth, 2,
+            "decision should push child and increase stack depth"
+        );
+
+        let root_pc = s.ExportChunk().Stack[0].Pc;
+        assert_eq!(
+            root_pc, 0,
+            "decide should set resume PC to current parent PC"
+        );
+
+        s.BoardMut().Set(Keys::Recover, false).unwrap();
+        let _ = s.Tick().unwrap();
+        let t2 = s.Tick().unwrap();
+        assert_eq!(
+            t2.Decisions[0].Candidates[0].1, 0.0,
+            "negative recover score should clamp to 0.0"
+        );
+    }
+
+    #[test]
+    fn DecideEmptyCandidatesFailsClearly() {
+        fn Root(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[],
+                DwDecideOptions {
+                    Hysteresis: 0.1,
+                    MinCommitTicks: 0,
+                    TieBreak: DwTieBreak::First,
+                },
+            )
+        }
+        let (reg, root, _, _) = BuildRegistry(Root);
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(
+            t0.Status,
+            DwRunStatus::Failed,
+            "empty decide candidate list should fail the frame loudly"
+        );
+        assert_eq!(
+            t0.FailureReason,
+            Some("decide candidates cannot be empty"),
+            "empty decide failure reason should be directly inspectable"
+        );
+    }
+
+    #[test]
+    fn TieBreakFirstPrefersAuthorOrder() {
+        fn Half(_ctx: &DwFrameCtx) -> f32 {
+            0.5
+        }
+        fn Root(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 3,
+                        },
+                        Half,
+                    ),
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 2,
+                        },
+                        Half,
+                    ),
+                ],
+                DwDecideOptions {
+                    Hysteresis: 0.0,
+                    MinCommitTicks: 0,
+                    TieBreak: DwTieBreak::First,
+                },
+            )
+        }
+        let (reg, root, _, patrol) = BuildRegistry(Root);
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(
+            t0.Frame,
+            Some(patrol),
+            "tie-break First should pick the first candidate in authored order"
+        );
+    }
+
+    #[test]
+    fn TieBreakKeepCurrentRetainsCommittedWhenTied() {
+        fn Half(_ctx: &DwFrameCtx) -> f32 {
+            0.5
+        }
+        fn Root(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 3,
+                        },
+                        Half,
+                    ),
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 2,
+                        },
+                        Half,
+                    ),
+                ],
+                DwDecideOptions {
+                    Hysteresis: 0.0,
+                    MinCommitTicks: 0,
+                    TieBreak: DwTieBreak::KeepCurrent,
+                },
+            )
+        }
+        let (reg, root, recover, patrol) = BuildRegistry(Root);
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+
+        let first = s.Tick().unwrap();
+        assert_eq!(
+            first.Frame,
+            Some(patrol),
+            "first tie with no current should pick first candidate"
+        );
+        let _ = s.Tick().unwrap();
+        let second = s.Tick().unwrap();
+        assert_eq!(
+            second.Frame,
+            Some(patrol),
+            "keep-current should retain current target when tied for best"
+        );
+        assert_ne!(
+            second.Frame,
+            Some(recover),
+            "keep-current tie should not switch away from currently committed tied target"
+        );
+    }
+
+    #[test]
+    fn HysteresisRetainsAndThenAllowsSwitchOnMargin() {
+        fn RecoverFromBoard(ctx: &DwFrameCtx) -> f32 {
+            if ctx.Board().GetOr(Keys::Recover, false) {
+                0.60
+            } else {
+                0.50
+            }
+        }
+        fn PatrolFixed(_ctx: &DwFrameCtx) -> f32 {
+            0.55
+        }
+        fn Root(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 2,
+                        },
+                        RecoverFromBoard,
+                    ),
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 3,
+                        },
+                        PatrolFixed,
+                    ),
+                ],
+                DwDecideOptions {
+                    Hysteresis: 0.10,
+                    MinCommitTicks: 0,
+                    TieBreak: DwTieBreak::First,
+                },
+            )
+        }
+        let (reg, root, recover, patrol) = BuildRegistry(Root);
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        s.BoardMut().Set(Keys::Recover, true).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(
+            t0.Frame,
+            Some(recover),
+            "recover should commit first when score is higher"
+        );
+        let _ = s.Tick().unwrap();
+
+        s.BoardMut().Set(Keys::Recover, false).unwrap();
+        let t2 = s.Tick().unwrap();
+        assert_eq!(
+            t2.Frame,
+            Some(recover),
+            "hysteresis should retain current target when challenger score does not exceed margin"
+        );
+        assert!(
+            t2.Decisions[0].HysteresisApplied,
+            "decision trace should flag hysteresis retention when margin blocks a switch"
+        );
+
+        fn PatrolStrong(_ctx: &DwFrameCtx) -> f32 {
+            0.70
+        }
+        fn RootStrong(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 2,
+                        },
+                        RecoverFromBoard,
+                    ),
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 3,
+                        },
+                        PatrolStrong,
+                    ),
+                ],
+                DwDecideOptions {
+                    Hysteresis: 0.10,
+                    MinCommitTicks: 0,
+                    TieBreak: DwTieBreak::First,
+                },
+            )
+        }
+        let (reg2, root2, _, patrol2) = BuildRegistry(RootStrong);
+        let mut s2 = DwSession::New(reg2, root2, 0).unwrap();
+        s2.BoardMut().Set(Keys::Recover, true).unwrap();
+        let _ = s2.Tick().unwrap();
+        let _ = s2.Tick().unwrap();
+        s2.BoardMut().Set(Keys::Recover, false).unwrap();
+        let t_switch = s2.Tick().unwrap();
+        assert_eq!(
+            t_switch.Frame,
+            Some(patrol2),
+            "challenger should win once score exceeds current by at least hysteresis margin"
+        );
+        assert_eq!(
+            root, root2,
+            "test setup should keep root identities consistent"
+        );
+        assert_eq!(
+            patrol, patrol2,
+            "test setup should keep patrol identities consistent"
+        );
+    }
+
+    #[test]
+    fn MinCommitRetainsUntilWindowExpiresAndAgeAdvances() {
+        fn RecoverLow(_ctx: &DwFrameCtx) -> f32 {
+            0.2
+        }
+        fn PatrolHigh(_ctx: &DwFrameCtx) -> f32 {
+            0.9
+        }
+        fn Root(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 2,
+                        },
+                        RecoverLow,
+                    ),
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 3,
+                        },
+                        PatrolHigh,
+                    ),
+                ],
+                DwDecideOptions {
+                    Hysteresis: 0.0,
+                    MinCommitTicks: 2,
+                    TieBreak: DwTieBreak::First,
+                },
+            )
+        }
+
+        let (reg, root, _recover, patrol) = BuildRegistry(Root);
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        let first = s.Tick().unwrap();
+        assert_eq!(
+            first.Frame,
+            Some(patrol),
+            "initial winner should commit to high score target"
+        );
+        assert_eq!(
+            first.Decisions[0].CommitAge, 0,
+            "initial commit age should start at zero"
+        );
+        let _ = s.Tick().unwrap();
+        let second = s.Tick().unwrap();
+        assert_eq!(
+            second.Frame,
+            Some(patrol),
+            "same target should remain selected within min-commit window"
+        );
+        assert_eq!(
+            second.Decisions[0].CommitAge, 1,
+            "commit age should advance per decision tick"
+        );
+        assert!(
+            second.Decisions[0].MinCommitApplied,
+            "decision trace should mark min-commit retention while age is below threshold"
+        );
+    }
+
+    #[test]
+    fn PushResumeAndTracePersistenceAcrossRestore() {
+        fn RecoverScoreLocal(ctx: &DwFrameCtx) -> f32 {
+            if ctx.Tick() < 2 { 0.8 } else { 0.2 }
+        }
+        fn PatrolScoreLocal(_ctx: &DwFrameCtx) -> f32 {
+            0.6
+        }
+        fn Root(ctx: &mut DwFrameCtx) -> DwControl {
+            Dw::Decide(
+                ctx,
+                &[
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 2,
+                        },
+                        RecoverScoreLocal,
+                    ),
+                    Dw::When(
+                        DwFrameId {
+                            Domain: 10,
+                            Local: 3,
+                        },
+                        PatrolScoreLocal,
+                    ),
+                ],
+                DwDecideOptions {
+                    Hysteresis: 0.0,
+                    MinCommitTicks: 2,
+                    TieBreak: DwTieBreak::KeepCurrent,
+                },
+            )
+        }
+
+        let (reg_u, root, recover, patrol) = BuildRegistry(Root);
+        let mut uninterrupted = DwSession::New(reg_u, root, 0).unwrap();
+        for _ in 0..6 {
+            uninterrupted.Tick().unwrap();
+        }
+
+        let (reg_s, root_s, _, _) = BuildRegistry(Root);
+        let mut split = DwSession::New(reg_s, root_s, 0).unwrap();
+        let d0 = split.Tick().unwrap();
+        assert_eq!(
+            d0.Frame,
+            Some(recover),
+            "decide should push selected child and child should become active next"
+        );
+        let c1 = split.Tick().unwrap();
+        assert_eq!(
+            c1.Frame,
+            Some(root),
+            "child pop should return control to parent on later tick"
+        );
+        assert_eq!(
+            c1.Pc,
+            Some(0),
+            "parent should resume same PC after child pop for re-evaluation"
+        );
+
+        let chunk = split.ExportChunk();
+        assert!(
+            !chunk.DecisionMemory.is_empty(),
+            "runtime chunk should persist decision commitment memory for restore continuity"
+        );
+
+        let (reg_r, _, _, _) = BuildRegistry(Root);
+        let mut restored = DwSession::FromChunk(reg_r, chunk).unwrap();
+        for _ in 0..4 {
+            restored.Tick().unwrap();
+        }
+
+        let mut combined = split.Trace().to_vec();
+        combined.extend_from_slice(restored.Trace());
+        let cmp = CompareTrace(uninterrupted.Trace(), &combined);
+        assert!(
+            cmp.Matches,
+            "restored run should match uninterrupted trace for min-commit decision continuity: {}",
+            FormatComparison(&cmp)
+        );
+
+        let formatted = FormatTraceEntry(&combined[0]);
+        assert!(
+            formatted.contains("decisions=["),
+            "formatted trace entry should include deterministic decision summary text"
+        );
+        assert!(
+            combined[0].Decisions[0]
+                .Candidates
+                .iter()
+                .any(|(id, _)| *id == recover)
+                && combined[0].Decisions[0]
+                    .Candidates
+                    .iter()
+                    .any(|(id, _)| *id == patrol),
+            "decision records should include candidate target IDs for inspectability"
         );
     }
 }
