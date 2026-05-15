@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M5)
+# Dunewyrm Architecture Contract (M6)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -58,3 +58,12 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - Chunk boundaries are tick/result boundaries; mid-frame serialization is not supported.
 - Chunks persist session tick/status/failure, wait state, runtime stack, board state, dirty slots, and mailbox visible/staged queues.
 - Persistence currently avoids serde and versioned storage formats by design.
+
+
+## M6 tick trace and comparison
+
+- Session records one structured `DwTickTraceEntry` per tick in memory.
+- Trace entries include tick/status/frame/pc/stack/control/dirty slots/mailbox snapshots/failure reason.
+- `CompareTrace` reports first mismatch index and reason, including expected/actual entries when available.
+- Formatting helpers (`FormatTraceEntry`, `FormatTrace`, `FormatComparison`) are diagnostics only.
+- No trace file artifact writer or serde serialization is added in M6.
