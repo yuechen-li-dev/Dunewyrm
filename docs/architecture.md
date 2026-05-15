@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (Pre-M0)
+# Dunewyrm Architecture Contract (M1)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
