@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M7)
+# Dunewyrm Architecture Contract (M8)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -77,4 +77,9 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - Decision helper pushes selected child and resumes parent at the same PC on later ticks (decision tick is real).
 - Utility commitment memory is runtime-owned, keyed by frame+PC, and persisted through chunk export/import.
 - Tick traces include structured decision entries for deterministic diagnostics.
-- M7 still does not include actuation.
+- M8 includes actuation intent recording only (no side-effect execution):
+  - `DwActId` is domain-scoped numeric identity (`Domain`, `Local`).
+  - Frames can emit immediate acts and schedule deferred acts through frame context.
+  - Deferred acts mature at tick boundary start; acts scheduled during tick `N` with `delay=0` mature on tick `N+1`.
+  - Tick results/traces include immediate and matured deferred acts.
+  - Pending deferred acts (with due ticks) persist through runtime chunks.

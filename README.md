@@ -6,7 +6,7 @@ Dunewyrm is the Rust control-kernel sibling of the Dominatus / DragonGod family.
 
 - A Rust-native expression of the same execution-model truths used in the family runtimes.
 - A project that prioritizes explicit state, explicit progression, deterministic behavior, and testability.
-- Currently in **M7 utility decisions with hysteresis/min-commit runtime**.
+- Currently in **M8 actuation intent runtime (immediate + deferred recorded acts)**.
 
 ## What Dunewyrm is not
 
@@ -50,4 +50,5 @@ cargo test
 - The decision tick is real: selected child is pushed and starts on a later tick, and parent resumes the same PC after child return.
 - Utility commitment memory is runtime-owned, keyed by frame+PC, and persisted in runtime chunks.
 - Decision records are included in tick results and tick trace entries for inspection.
-- No actuation is added yet in M7.
+- M8 adds recorded actuation intent only: `DwActId`, immediate acts, deferred acts, and deferred persistence.
+- No side-effect handlers or act payload schemas are included yet.
