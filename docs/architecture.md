@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M8)
+# Dunewyrm Architecture Contract (M9)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -83,3 +83,11 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
   - Deferred acts mature at tick boundary start; acts scheduled during tick `N` with `delay=0` mature on tick `N+1`.
   - Tick results/traces include immediate and matured deferred acts.
   - Pending deferred acts (with due ticks) persist through runtime chunks.
+
+
+## M9 first external sample
+
+- A tiny Guard Patrol / Recover sample exists outside core runtime modules at `samples/guard_patrol.rs`.
+- The sample is authored like downstream library usage and relies only on public `dunewyrm` APIs.
+- It exercises stack transitions, typed board writes, mailbox consumption, utility decisions (`Dw::Decide`), immediate and deferred actuation, trace determinism, and chunk restore equivalence via integration tests.
+- M9 intentionally does not add broad sample frameworks or runtime redesign.
