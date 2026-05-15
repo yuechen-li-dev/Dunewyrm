@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M4)
+# Dunewyrm Architecture Contract (M5)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -50,4 +50,11 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - `Enqueue` during a tick appends only to staged, never to same-tick visible reads.
 - Visible messages remain in FIFO order until consumed.
 - Mailbox is synchronous runtime state only: no async/event loop machinery.
-- Mailbox persistence is not implemented in M4 and is deferred to M5.
+
+## M5 persistence chunks
+
+- Runtime chunk export/import exists as plain Rust data structs, not file serialization.
+- Restore requires caller-provided `DwFrameRegistry`; no global registry lookup is used.
+- Chunk boundaries are tick/result boundaries; mid-frame serialization is not supported.
+- Chunks persist session tick/status/failure, wait state, runtime stack, board state, dirty slots, and mailbox visible/staged queues.
+- Persistence currently avoids serde and versioned storage formats by design.

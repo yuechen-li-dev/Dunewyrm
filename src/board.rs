@@ -33,8 +33,8 @@ pub trait DwBoardValue: Copy {
     fn SetOn(board: &mut DwBoard, slot: u32, value: Self);
 }
 
-#[derive(Clone, Copy)]
-struct DwSlotMeta {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DwSlotMetaChunk {
     Name: &'static str,
     Kind: DwBoardKind,
 }
@@ -53,8 +53,18 @@ pub struct DwBoard {
     I32Entries: Vec<(u32, i32)>,
     F32Entries: Vec<(u32, f32)>,
     DirtySlots: BTreeSet<u32>,
-    SlotMeta: HashMap<u32, DwSlotMeta>,
+    SlotMeta: HashMap<u32, DwSlotMetaChunk>,
     LastSlotCollision: Option<DwSlotCollision>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DwBoardChunk {
+    pub BoolEntries: Vec<(u32, bool)>,
+    pub I32Entries: Vec<(u32, i32)>,
+    pub F32Entries: Vec<(u32, f32)>,
+    pub DirtySlots: Vec<u32>,
+    pub SlotMeta: Vec<(u32, DwSlotMetaChunk)>,
+    pub LastSlotCollision: Option<DwSlotCollision>,
 }
 
 impl DwBoard {
@@ -101,6 +111,44 @@ impl DwBoard {
         self.LastSlotCollision
     }
 
+    pub fn ExportChunk(&self) -> DwBoardChunk {
+        let mut slot_meta = self
+            .SlotMeta
+            .iter()
+            .map(|(slot, meta)| (*slot, *meta))
+            .collect::<Vec<_>>();
+        slot_meta.sort_by_key(|entry| entry.0);
+
+        DwBoardChunk {
+            BoolEntries: self.BoolEntries.clone(),
+            I32Entries: self.I32Entries.clone(),
+            F32Entries: self.F32Entries.clone(),
+            DirtySlots: self.DirtySlots(),
+            SlotMeta: slot_meta,
+            LastSlotCollision: self.LastSlotCollision,
+        }
+    }
+
+    pub fn FromChunk(chunk: DwBoardChunk) -> Self {
+        let mut dirty = BTreeSet::new();
+        for slot in chunk.DirtySlots {
+            dirty.insert(slot);
+        }
+        let mut slot_meta = HashMap::new();
+        for (slot, meta) in chunk.SlotMeta {
+            slot_meta.insert(slot, meta);
+        }
+
+        Self {
+            BoolEntries: chunk.BoolEntries,
+            I32Entries: chunk.I32Entries,
+            F32Entries: chunk.F32Entries,
+            DirtySlots: dirty,
+            SlotMeta: slot_meta,
+            LastSlotCollision: chunk.LastSlotCollision,
+        }
+    }
+
     fn ValidateKeyMeta(
         &mut self,
         incoming_name: &'static str,
@@ -124,7 +172,7 @@ impl DwBoard {
 
         self.SlotMeta.insert(
             incoming_slot,
-            DwSlotMeta {
+            DwSlotMetaChunk {
                 Name: incoming_name,
                 Kind: incoming_kind,
             },

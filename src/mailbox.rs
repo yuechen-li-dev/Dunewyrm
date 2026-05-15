@@ -13,6 +13,12 @@ pub struct DwMailbox {
     Staged: VecDeque<DwMessage>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DwMailboxChunk {
+    pub Visible: Vec<DwMessage>,
+    pub Staged: Vec<DwMessage>,
+}
+
 impl DwMailbox {
     pub fn New() -> Self {
         Self {
@@ -49,5 +55,19 @@ impl DwMailbox {
 
     pub fn StagedSnapshot(&self) -> Vec<DwMessage> {
         self.Staged.iter().copied().collect()
+    }
+
+    pub fn ExportChunk(&self) -> DwMailboxChunk {
+        DwMailboxChunk {
+            Visible: self.VisibleSnapshot(),
+            Staged: self.StagedSnapshot(),
+        }
+    }
+
+    pub fn FromChunk(chunk: DwMailboxChunk) -> Self {
+        Self {
+            Visible: chunk.Visible.into(),
+            Staged: chunk.Staged.into(),
+        }
     }
 }

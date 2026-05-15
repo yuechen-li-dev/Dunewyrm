@@ -1,8 +1,8 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    DwBoard, DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwMailbox, DwMessage,
-    DwPhase, DwSlotCollision,
+    DwBoard, DwBoardChunk, DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwMailbox,
+    DwMailboxChunk, DwMessage, DwPhase, DwSlotCollision,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,6 +97,23 @@ pub struct DwSession {
     Mailbox: DwMailbox,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DwWaitChunk {
+    pub WaitRemaining: u32,
+    pub WaitResumePc: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DwRuntimeChunk {
+    pub Tick: u64,
+    pub Status: DwRunStatus,
+    pub FailureReason: Option<&'static str>,
+    pub Wait: DwWaitChunk,
+    pub Stack: Vec<DwRuntimeFrame>,
+    pub Board: DwBoardChunk,
+    pub Mailbox: DwMailboxChunk,
+}
+
 impl DwSession {
     pub fn New(
         registry: DwFrameRegistry,
@@ -172,6 +189,44 @@ impl DwSession {
         let r = self.BuildResult(tick_now, Some(Self::Summarize(control)));
         self.Tick += 1;
         Ok(r)
+    }
+
+    pub fn ExportChunk(&self) -> DwRuntimeChunk {
+        DwRuntimeChunk {
+            Tick: self.Tick,
+            Status: self.Status,
+            FailureReason: self.FailureReason,
+            Wait: DwWaitChunk {
+                WaitRemaining: self.WaitRemaining,
+                WaitResumePc: self.WaitResumePc,
+            },
+            Stack: self.Stack.clone(),
+            Board: self.Board.ExportChunk(),
+            Mailbox: self.Mailbox.ExportChunk(),
+        }
+    }
+
+    pub fn FromChunk(
+        registry: DwFrameRegistry,
+        chunk: DwRuntimeChunk,
+    ) -> Result<Self, &'static str> {
+        for frame in &chunk.Stack {
+            if registry.Find(frame.Id).is_none() {
+                return Err("chunk stack frame not found in registry");
+            }
+        }
+
+        Ok(Self {
+            Registry: registry,
+            Stack: chunk.Stack,
+            Tick: chunk.Tick,
+            WaitRemaining: chunk.Wait.WaitRemaining,
+            WaitResumePc: chunk.Wait.WaitResumePc,
+            Status: chunk.Status,
+            FailureReason: chunk.FailureReason,
+            Board: DwBoard::FromChunk(chunk.Board),
+            Mailbox: DwMailbox::FromChunk(chunk.Mailbox),
+        })
     }
 
     fn ApplyControl(&mut self, control: DwControl) {
