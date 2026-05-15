@@ -2,17 +2,25 @@
 
 Dunewyrm is the Rust control-kernel sibling of the Dominatus / DragonGod family.
 
+
+## Read this first
+
+- Architecture contract: `docs/architecture.md`
+- Practical frame-authoring guide: `docs/authoring.md`
+- Canonical external sample: `samples/guard_patrol.rs`
+- Sample integration coverage: `tests/m9_guard_patrol_sample.rs`
+
 ## What Dunewyrm is
 
 - A Rust-native expression of the same execution-model truths used in the family runtimes.
 - A project that prioritizes explicit state, explicit progression, deterministic behavior, and testability.
-- Currently in **M9 first external sample (Guard Patrol / Recover) on top of M8 actuation intent runtime**.
+- Currently in **M10 docs/API polish/warning cleanup on top of the M1–M9 runtime arc**.
 
 ## What Dunewyrm is not
 
 - Not a line-by-line DragonGod C++ copy.
 - Not a macro-heavy or trait-heavy Rust showcase.
-- Not a broad full-runtime implementation yet (currently M1 single-frame kernel only).
+- Not a broad full-runtime implementation yet (currently M10 docs/API polish on top of M1–M9 runtime arc).
 
 ## Status
 
@@ -22,6 +30,7 @@ This repository currently contains:
 - Project and contributor rules in `AGENTS.md`.
 - Stack runtime kernel implementation for M2 plus M3 typed board memory (`bool`, `i32`, `f32`) with dirty tracking and slot collision diagnostics, and M4 deterministic mailbox visible/staged semantics.
 - A compact architecture/milestone contract in `docs/architecture.md`.
+- A practical authoring guide in `docs/authoring.md` for frame/runtime usage.
 
 ## Milestone sketch
 

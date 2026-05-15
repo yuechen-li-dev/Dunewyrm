@@ -27,6 +27,8 @@ pub fn ProjectName() -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[allow(non_upper_case_globals)]
 mod tests {
     use super::*;
 
@@ -935,6 +937,8 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[allow(non_upper_case_globals)]
 mod m7_tests {
     use super::*;
 
