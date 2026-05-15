@@ -1,11 +1,14 @@
 #![allow(non_snake_case)]
 
-use crate::DwPhase;
+use crate::{DwFrameId, DwPhase};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DwControl {
     Continue { Pc: u32 },
     WaitTicks { Ticks: u32, Pc: u32 },
+    Push { Target: DwFrameId, ResumePc: u32 },
+    Pop,
+    Replace { Target: DwFrameId },
     Stay,
     Complete,
     Fail { Reason: &'static str },
@@ -15,13 +18,16 @@ pub enum DwControl {
 pub enum DwControlSummary {
     Continue,
     WaitTicks { Ticks: u32 },
+    Push,
+    Pop,
+    Replace,
     Stay,
     Complete,
     Fail,
 }
 
 pub mod Dw {
-    use super::{DwControl, DwPhase};
+    use super::{DwControl, DwFrameId, DwPhase};
 
     pub fn Continue<P: DwPhase>(phase: P) -> DwControl {
         DwControl::Continue { Pc: phase.ToPc() }
@@ -32,6 +38,21 @@ pub mod Dw {
             Ticks: ticks,
             Pc: phase.ToPc(),
         }
+    }
+
+    pub fn Push<P: DwPhase>(target: DwFrameId, resume_phase: P) -> DwControl {
+        DwControl::Push {
+            Target: target,
+            ResumePc: resume_phase.ToPc(),
+        }
+    }
+
+    pub fn Pop() -> DwControl {
+        DwControl::Pop
+    }
+
+    pub fn Replace(target: DwFrameId) -> DwControl {
+        DwControl::Replace { Target: target }
     }
 
     pub fn Stay() -> DwControl {

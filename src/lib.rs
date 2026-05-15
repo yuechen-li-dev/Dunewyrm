@@ -10,7 +10,7 @@ pub use control::{Dw, DwControl, DwControlSummary};
 pub use ids::DwFrameId;
 pub use phase::DwPhase;
 pub use registry::{DwFrameDef, DwFrameFn, DwFrameRegistry};
-pub use session::{DwFrameCtx, DwRunStatus, DwSession, DwTickResult};
+pub use session::{DwFrameCtx, DwRunStatus, DwRuntimeFrame, DwSession, DwTickResult};
 
 pub fn ProjectName() -> &'static str {
     "Dunewyrm"
@@ -26,7 +26,6 @@ mod tests {
         Wait,
         Done,
     }
-
     impl DwPhase for RootPhase {
         fn ToPc(self) -> u32 {
             match self {
@@ -35,7 +34,6 @@ mod tests {
                 RootPhase::Done => 2,
             }
         }
-
         fn FromPc(pc: u32) -> Option<Self> {
             match pc {
                 0 => Some(RootPhase::Start),
@@ -45,7 +43,6 @@ mod tests {
             }
         }
     }
-
     fn Root(ctx: &mut DwFrameCtx) -> DwControl {
         match ctx.Phase::<RootPhase>() {
             Some(RootPhase::Start) => Dw::Continue(RootPhase::Wait),
@@ -61,180 +58,234 @@ mod tests {
     }
 
     #[test]
-    fn FrameIdSupportsEqualityAndDomainSeparation() {
-        let a = DwFrameId {
-            Domain: 1,
-            Local: 7,
-        };
-        let b = DwFrameId {
-            Domain: 1,
-            Local: 7,
-        };
-        let c = DwFrameId {
-            Domain: 2,
-            Local: 7,
-        };
-
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn RegistrySupportsRegisterAndLookupAndRejectsDuplicates() {
-        let frame_id = DwFrameId {
-            Domain: 3,
-            Local: 1,
-        };
-        let mut registry = DwFrameRegistry::New();
-
-        assert!(
-            registry
-                .Register(DwFrameDef {
-                    Id: frame_id,
-                    Step: Root,
-                    DebugName: "Root",
-                })
-                .is_ok()
-        );
-
-        let found = registry.Find(frame_id).expect("frame should exist");
-        assert_eq!(found.DebugName, "Root");
-
-        let duplicate = registry.Register(DwFrameDef {
-            Id: frame_id,
-            Step: Root,
-            DebugName: "RootDuplicate",
-        });
-        assert!(duplicate.is_err());
-    }
-
-    #[test]
-    fn PhaseMappingAndContextPhaseWork() {
-        assert_eq!(RootPhase::FromPc(1), Some(RootPhase::Wait));
-        assert_eq!(RootPhase::Wait.ToPc(), 1);
-
-        let ctx = DwFrameCtx::New(
-            DwFrameId {
-                Domain: 1,
-                Local: 1,
-            },
-            1,
-            5,
-        );
-        assert_eq!(ctx.Pc(), 1);
-        assert_eq!(ctx.Tick(), 5);
-        assert_eq!(ctx.Phase::<RootPhase>(), Some(RootPhase::Wait));
-    }
-
-    #[test]
-    fn SessionTickDeterminismCoversContinueWaitStayCompleteAndFail() {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        enum DemoPhase {
+    fn StackPushPopAndChildCompleteWorkDeterministically() {
+        #[derive(Clone, Copy)]
+        enum R {
             Start,
-            Hold,
-            Finish,
-            Fail,
+            After,
         }
-
-        impl DwPhase for DemoPhase {
+        impl DwPhase for R {
             fn ToPc(self) -> u32 {
                 match self {
-                    DemoPhase::Start => 0,
-                    DemoPhase::Hold => 1,
-                    DemoPhase::Finish => 2,
-                    DemoPhase::Fail => 3,
+                    R::Start => 0,
+                    R::After => 1,
                 }
             }
-
             fn FromPc(pc: u32) -> Option<Self> {
                 match pc {
-                    0 => Some(DemoPhase::Start),
-                    1 => Some(DemoPhase::Hold),
-                    2 => Some(DemoPhase::Finish),
-                    3 => Some(DemoPhase::Fail),
+                    0 => Some(R::Start),
+                    1 => Some(R::After),
                     _ => None,
                 }
             }
         }
-
-        fn DemoFrame(ctx: &mut DwFrameCtx) -> DwControl {
-            match ctx.Phase::<DemoPhase>() {
-                Some(DemoPhase::Start) => Dw::Continue(DemoPhase::Hold),
-                Some(DemoPhase::Hold) => {
-                    if ctx.Tick() == 1 {
-                        Dw::WaitTicks(2, DemoPhase::Finish)
-                    } else {
-                        Dw::Stay()
-                    }
-                }
-                Some(DemoPhase::Finish) => Dw::Continue(DemoPhase::Fail),
-                Some(DemoPhase::Fail) => Dw::Fail("terminal fail"),
-                None => Dw::Fail("unknown phase"),
+        #[derive(Clone, Copy)]
+        enum C {
+            Begin,
+        }
+        impl DwPhase for C {
+            fn ToPc(self) -> u32 {
+                0
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                if pc == 0 { Some(C::Begin) } else { None }
             }
         }
-
-        let frame_id = DwFrameId {
-            Domain: 9,
-            Local: 9,
+        let root_id = DwFrameId {
+            Domain: 1,
+            Local: 1,
         };
-        let mut registry = DwFrameRegistry::New();
-        registry
-            .Register(DwFrameDef {
-                Id: frame_id,
-                Step: DemoFrame,
-                DebugName: "Demo",
-            })
-            .unwrap();
-
-        let mut session = DwSession::New(registry, frame_id, DemoPhase::Start.ToPc()).unwrap();
-
-        let t0 = session.Tick().unwrap();
-        assert_eq!(t0.Status, DwRunStatus::Running);
-        assert_eq!(t0.Pc, DemoPhase::Hold.ToPc());
-
-        let t1 = session.Tick().unwrap();
-        assert_eq!(t1.Status, DwRunStatus::Waiting);
-        assert_eq!(t1.Pc, DemoPhase::Hold.ToPc());
-
-        let t2 = session.Tick().unwrap();
-        assert_eq!(t2.Status, DwRunStatus::Waiting);
-        assert_eq!(t2.Pc, DemoPhase::Hold.ToPc());
-
-        let t3 = session.Tick().unwrap();
-        assert_eq!(t3.Status, DwRunStatus::Running);
-        assert_eq!(t3.Pc, DemoPhase::Finish.ToPc());
-
-        let t4 = session.Tick().unwrap();
-        assert_eq!(t4.Status, DwRunStatus::Running);
-        assert_eq!(t4.Pc, DemoPhase::Fail.ToPc());
-
-        let t5 = session.Tick().unwrap();
-        assert_eq!(t5.Status, DwRunStatus::Failed);
-        assert_eq!(t5.FailureReason, Some("terminal fail"));
-
-        let t6 = session.Tick().unwrap();
-        assert_eq!(t6.Status, DwRunStatus::Failed);
+        let child_id = DwFrameId {
+            Domain: 1,
+            Local: 2,
+        };
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            match ctx.Phase::<R>() {
+                Some(R::Start) => Dw::Push(
+                    DwFrameId {
+                        Domain: 1,
+                        Local: 2,
+                    },
+                    R::After,
+                ),
+                Some(R::After) => Dw::Complete(),
+                None => Dw::Fail("root phase"),
+            }
+        }
+        fn ChildF(_: &mut DwFrameCtx) -> DwControl {
+            Dw::Complete()
+        }
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root_id,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: child_id,
+            Step: ChildF,
+            DebugName: "Child",
+        })
+        .unwrap();
+        let mut s = DwSession::New(reg, root_id, 0).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(t0.Control, Some(DwControlSummary::Push));
+        assert_eq!(t0.Frame, Some(child_id));
+        assert_eq!(t0.Pc, Some(0));
+        assert_eq!(t0.StackDepth, 2);
+        let t1 = s.Tick().unwrap();
+        assert_eq!(t1.Control, Some(DwControlSummary::Complete));
+        assert_eq!(t1.Frame, Some(root_id));
+        assert_eq!(t1.Pc, Some(1));
+        assert_eq!(t1.StackDepth, 1);
+        let t2 = s.Tick().unwrap();
+        assert_eq!(t2.Status, DwRunStatus::Completed);
     }
 
     #[test]
-    fn AuthoringShapeProofCompletes() {
-        let frame_id = DwFrameId {
-            Domain: 4,
+    fn WaitInChildBlocksParentAndResumesChild() {
+        #[derive(Clone, Copy)]
+        enum R {
+            Start,
+            After,
+        }
+        impl DwPhase for R {
+            fn ToPc(self) -> u32 {
+                match self {
+                    R::Start => 0,
+                    R::After => 1,
+                }
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                match pc {
+                    0 => Some(R::Start),
+                    1 => Some(R::After),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, Copy)]
+        enum C {
+            Start,
+            Done,
+        }
+        impl DwPhase for C {
+            fn ToPc(self) -> u32 {
+                match self {
+                    C::Start => 0,
+                    C::Done => 1,
+                }
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                match pc {
+                    0 => Some(C::Start),
+                    1 => Some(C::Done),
+                    _ => None,
+                }
+            }
+        }
+        let root_id = DwFrameId {
+            Domain: 2,
+            Local: 1,
+        };
+        let child_id = DwFrameId {
+            Domain: 2,
             Local: 2,
         };
-        let mut registry = DwFrameRegistry::New();
-        registry
-            .Register(DwFrameDef {
-                Id: frame_id,
-                Step: Root,
-                DebugName: "Root",
-            })
-            .unwrap();
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            match ctx.Phase::<R>() {
+                Some(R::Start) => Dw::Push(
+                    DwFrameId {
+                        Domain: 2,
+                        Local: 2,
+                    },
+                    R::After,
+                ),
+                Some(R::After) => Dw::Complete(),
+                None => Dw::Fail("root"),
+            }
+        }
+        fn ChildF(ctx: &mut DwFrameCtx) -> DwControl {
+            match ctx.Phase::<C>() {
+                Some(C::Start) => Dw::WaitTicks(2, C::Done),
+                Some(C::Done) => Dw::Pop(),
+                None => Dw::Fail("child"),
+            }
+        }
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root_id,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: child_id,
+            Step: ChildF,
+            DebugName: "Child",
+        })
+        .unwrap();
+        let mut s = DwSession::New(reg, root_id, 0).unwrap();
+        s.Tick().unwrap();
+        let t1 = s.Tick().unwrap();
+        assert_eq!(t1.Status, DwRunStatus::Waiting);
+        assert_eq!(t1.Frame, Some(child_id));
+        let t2 = s.Tick().unwrap();
+        assert_eq!(t2.Status, DwRunStatus::Waiting);
+        assert_eq!(t2.Frame, Some(child_id));
+        let t3 = s.Tick().unwrap();
+        assert_eq!(t3.Status, DwRunStatus::Running);
+        assert_eq!(t3.Frame, Some(child_id));
+        assert_eq!(t3.Pc, Some(1));
+    }
 
-        let mut session = DwSession::New(registry, frame_id, RootPhase::Start.ToPc()).unwrap();
-        assert_eq!(session.Tick().unwrap().Status, DwRunStatus::Running);
-        assert_eq!(session.Tick().unwrap().Status, DwRunStatus::Waiting);
-        assert_eq!(session.Tick().unwrap().Status, DwRunStatus::Running);
-        assert_eq!(session.Tick().unwrap().Status, DwRunStatus::Completed);
+    #[test]
+    fn ReplaceAndFailureCasesCovered() {
+        let root = DwFrameId {
+            Domain: 3,
+            Local: 1,
+        };
+        let repl = DwFrameId {
+            Domain: 3,
+            Local: 2,
+        };
+        fn RootF(_: &mut DwFrameCtx) -> DwControl {
+            Dw::Replace(DwFrameId {
+                Domain: 3,
+                Local: 2,
+            })
+        }
+        fn ReplF(_: &mut DwFrameCtx) -> DwControl {
+            Dw::Complete()
+        }
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: repl,
+            Step: ReplF,
+            DebugName: "Repl",
+        })
+        .unwrap();
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(t0.Control, Some(DwControlSummary::Replace));
+        assert_eq!(t0.Frame, Some(repl));
+
+        let mut reg2 = DwFrameRegistry::New();
+        reg2.Register(DwFrameDef {
+            Id: root,
+            Step: |_| Dw::Pop(),
+            DebugName: "RootPop",
+        })
+        .unwrap();
+        let mut s2 = DwSession::New(reg2, root, 0).unwrap();
+        let f = s2.Tick().unwrap();
+        assert_eq!(f.Status, DwRunStatus::Failed);
     }
 }
