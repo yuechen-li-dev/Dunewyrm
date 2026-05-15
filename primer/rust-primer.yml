@@ -285,7 +285,7 @@ decision_rules:
   - Prefer small explicit state transitions over hidden aliasing and mutation channels.
   - If the clever solution and the boring solution are both valid, choose the boring solution.
 
-examples:
+examples_guide:
   ownership_examples:
     headline:
       Show owned struct design contrasted with borrowed-field pretzeling.
