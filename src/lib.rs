@@ -1,11 +1,13 @@
 #![allow(non_snake_case)]
 
+mod board;
 mod control;
 mod ids;
 mod phase;
 mod registry;
 mod session;
 
+pub use board::{DwBoard, DwBoardKind, DwBoardValue, DwKey, DwSlotCollision};
 pub use control::{Dw, DwControl, DwControlSummary};
 pub use ids::DwFrameId;
 pub use phase::DwPhase;
@@ -287,5 +289,149 @@ mod tests {
         let mut s2 = DwSession::New(reg2, root, 0).unwrap();
         let f = s2.Tick().unwrap();
         assert_eq!(f.Status, DwRunStatus::Failed);
+    }
+
+    mod Keys {
+        use crate::DwKey;
+        pub const Alerted: DwKey<bool> = DwKey::New("Alerted", 1);
+        pub const Count: DwKey<i32> = DwKey::New("Count", 2);
+        pub const Pressure: DwKey<f32> = DwKey::New("Pressure", 3);
+    }
+
+    #[test]
+    fn BoardSetGetDirtyAndCollisionBehavior() {
+        let mut board = DwBoard::New();
+        assert_eq!(board.GetOr(Keys::Alerted, false), false);
+        assert_eq!(board.GetOr(Keys::Count, -1), -1);
+        assert!((board.GetOr(Keys::Pressure, 1.5) - 1.5).abs() < f32::EPSILON);
+
+        board.Set(Keys::Alerted, true).unwrap();
+        board.Set(Keys::Count, 7).unwrap();
+        board.Set(Keys::Pressure, 2.0).unwrap();
+        board.Set(Keys::Alerted, false).unwrap();
+
+        assert_eq!(board.TryGet(Keys::Alerted), Some(false));
+        assert_eq!(board.TryGet(Keys::Count), Some(7));
+        assert_eq!(board.TryGet(Keys::Pressure), Some(2.0));
+        assert!(board.IsDirty(Keys::Alerted));
+        assert_eq!(board.DirtySlots(), vec![1, 2, 3]);
+
+        board.ClearDirty();
+        assert_eq!(board.DirtySlots(), Vec::<u32>::new());
+
+        let alias_ok = DwKey::<bool>::New("Alerted", 1);
+        board.Set(alias_ok, true).unwrap();
+
+        let bad_name = DwKey::<bool>::New("Other", 1);
+        assert!(board.Set(bad_name, true).is_err());
+        assert!(board.LastSlotCollision().is_some());
+
+        let bad_type = DwKey::<i32>::New("Alerted", 1);
+        assert!(board.Set(bad_type, 1).is_err());
+        assert_eq!(board.DirtySlots(), vec![1]);
+    }
+
+    #[test]
+    fn BoardFlowsAcrossParentAndChildFramesAndDirtyResetsPerTick() {
+        #[derive(Clone, Copy)]
+        enum R {
+            Start,
+            Verify,
+            Done,
+        }
+        impl DwPhase for R {
+            fn ToPc(self) -> u32 {
+                match self {
+                    R::Start => 0,
+                    R::Verify => 1,
+                    R::Done => 2,
+                }
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                match pc {
+                    0 => Some(R::Start),
+                    1 => Some(R::Verify),
+                    2 => Some(R::Done),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, Copy)]
+        enum C {
+            Start,
+        }
+        impl DwPhase for C {
+            fn ToPc(self) -> u32 {
+                0
+            }
+            fn FromPc(pc: u32) -> Option<Self> {
+                if pc == 0 { Some(C::Start) } else { None }
+            }
+        }
+
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            match ctx.Phase::<R>() {
+                Some(R::Start) => {
+                    ctx.BoardMut().Set(Keys::Count, 10).unwrap();
+                    Dw::Push(
+                        DwFrameId {
+                            Domain: 4,
+                            Local: 2,
+                        },
+                        R::Verify,
+                    )
+                }
+                Some(R::Verify) => {
+                    let count = ctx.Board().GetOr(Keys::Count, -1);
+                    if count == 11 {
+                        Dw::Continue(R::Done)
+                    } else {
+                        Dw::Fail("count")
+                    }
+                }
+                Some(R::Done) => Dw::Complete(),
+                None => Dw::Fail("root phase"),
+            }
+        }
+
+        fn ChildF(ctx: &mut DwFrameCtx) -> DwControl {
+            let count = ctx.Board().GetOr(Keys::Count, -1);
+            if count != 10 {
+                return Dw::Fail("missing parent value");
+            }
+            ctx.BoardMut().Set(Keys::Count, 11).unwrap();
+            Dw::Pop()
+        }
+
+        let root = DwFrameId {
+            Domain: 4,
+            Local: 1,
+        };
+        let child = DwFrameId {
+            Domain: 4,
+            Local: 2,
+        };
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        reg.Register(DwFrameDef {
+            Id: child,
+            Step: ChildF,
+            DebugName: "Child",
+        })
+        .unwrap();
+
+        let mut s = DwSession::New(reg, root, 0).unwrap();
+        let t0 = s.Tick().unwrap();
+        assert_eq!(t0.DirtySlots, vec![2]);
+        let t1 = s.Tick().unwrap();
+        assert_eq!(t1.DirtySlots, vec![2]);
+        let t2 = s.Tick().unwrap();
+        assert_eq!(t2.DirtySlots, Vec::<u32>::new());
+        assert_eq!(s.Board().TryGet(Keys::Count), Some(11));
     }
 }
