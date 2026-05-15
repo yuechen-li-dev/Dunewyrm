@@ -17,7 +17,7 @@ pub struct DwDecideOptions {
     pub TieBreak: DwTieBreak,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct DwUtilityCandidate {
     pub Target: DwFrameId,
     pub Score: DwScoreFn,

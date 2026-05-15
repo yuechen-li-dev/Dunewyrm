@@ -1,8 +1,9 @@
 #![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
 
 use dunewyrm::{
-    Dw, DwActId, DwControl, DwDecideOptions, DwFrameCtx, DwFrameDef, DwFrameRegistry, DwMessage,
-    DwPhase, DwTieBreak,
+    Dw, DwControl, DwDecideOptions, DwFrameCtx, DwFrameDef, DwFrameRegistry, DwMessage, DwPhase,
+    DwTieBreak,
 };
 
 pub mod GuardFrames {
