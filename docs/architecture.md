@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M1)
+# Dunewyrm Architecture Contract (M2)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -20,3 +20,14 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - No async/generators/nightly/proc-macro dependency in early runtime stages.
 - `FrameId` and `ActId` should evolve as domain-scoped numeric identities from the start.
 - Board memory should be typed and bounded, not a generic object store.
+
+
+## M2 stack semantics
+
+- Runtime uses an explicit frame stack with one frame-step call per tick.
+- `Push` stores parent resume PC and schedules child start at PC 0 on a later tick.
+- `Pop` removes top frame and resumes parent on a later tick.
+- `Replace` removes current top frame and installs target frame at PC 0 on a later tick.
+- Child `Complete` is treated as a successful pop; root `Complete` ends the session.
+- `WaitTicks` applies only to the current top frame and blocks parent execution while waiting.
+- Stack runtime is still pre-board, pre-mailbox, pre-utility, and pre-actuation.

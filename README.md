@@ -6,7 +6,7 @@ Dunewyrm is the Rust control-kernel sibling of the Dominatus / DragonGod family.
 
 - A Rust-native expression of the same execution-model truths used in the family runtimes.
 - A project that prioritizes explicit state, explicit progression, deterministic behavior, and testability.
-- Currently in **M1 single-frame explicit PC runtime**.
+- Currently in **M2 stack explicit PC runtime**.
 
 ## What Dunewyrm is not
 
@@ -20,7 +20,7 @@ This repository currently contains:
 
 - Primer rules in `primer/`.
 - Project and contributor rules in `AGENTS.md`.
-- Single-frame runtime kernel implementation for M1.
+- Stack runtime kernel implementation for M2 (including Push/Pop/Replace).
 - A compact architecture/milestone contract in `docs/architecture.md`.
 
 ## Milestone sketch
