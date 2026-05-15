@@ -6,7 +6,7 @@ Dunewyrm is the Rust control-kernel sibling of the Dominatus / DragonGod family.
 
 - A Rust-native expression of the same execution-model truths used in the family runtimes.
 - A project that prioritizes explicit state, explicit progression, deterministic behavior, and testability.
-- Currently in **M8 actuation intent runtime (immediate + deferred recorded acts)**.
+- Currently in **M9 first external sample (Guard Patrol / Recover) on top of M8 actuation intent runtime**.
 
 ## What Dunewyrm is not
 
@@ -34,7 +34,7 @@ This repository currently contains:
 - **M6 — Tick trace and comparison**: trace entries, first mismatch diagnostics, readable formatting.
 - **M7 — Utility decisions**: scorers, Decide, hysteresis, min-commit, tie-break, decision traces.
 - **M8 — Actuation**: domain-scoped act IDs, immediate/deferred acts, deferred persistence.
-- **M9 — First sample**: tiny pressure test for Rust authoring ergonomics.
+- **M9 — First external sample**: tiny Guard Patrol / Recover library-usage proof across stack/board/mailbox/utility/actuation/trace/persistence.
 
 ## Test
 
@@ -52,3 +52,11 @@ cargo test
 - Decision records are included in tick results and tick trace entries for inspection.
 - M8 adds recorded actuation intent only: `DwActId`, immediate acts, deferred acts, and deferred persistence.
 - No side-effect handlers or act payload schemas are included yet.
+
+
+## M9 first external sample
+
+- `samples/guard_patrol.rs` is an intentionally tiny external-style author sample.
+- It defines its own frame IDs, act IDs, and board keys, then builds a registry through public APIs only.
+- Integration tests in `tests/m9_guard_patrol_sample.rs` exercise stack, board, mailbox, utility decisions, immediate/deferred actuation, trace comparison, and save/restore equivalence.
+- The sample is deliberately small; larger domain samples are deferred to later milestones.
