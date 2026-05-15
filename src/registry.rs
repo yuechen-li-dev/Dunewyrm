@@ -6,7 +6,7 @@ use crate::DwControl;
 use crate::ids::DwFrameId;
 use crate::session::DwFrameCtx;
 
-pub type DwFrameFn = fn(&mut DwFrameCtx) -> DwControl;
+pub type DwFrameFn = for<'a> fn(&mut DwFrameCtx<'a>) -> DwControl;
 
 #[derive(Clone, Copy)]
 pub struct DwFrameDef {

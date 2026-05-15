@@ -1,4 +1,4 @@
-# Dunewyrm Architecture Contract (M2)
+# Dunewyrm Architecture Contract (M3)
 
 Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 
@@ -31,3 +31,13 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - Child `Complete` is treated as a successful pop; root `Complete` ends the session.
 - `WaitTicks` applies only to the current top frame and blocks parent execution while waiting.
 - Stack runtime is still pre-board, pre-mailbox, pre-utility, and pre-actuation.
+
+
+## M3 typed board memory
+
+- Session-owned board shared by all frames in the active stack.
+- Typed keys (`DwKey<T>`) are currently closed to `bool`, `i32`, and `f32`.
+- Board supports `Set`, `TryGet`, `GetOr`, `IsDirty`, `DirtySlots`, and `ClearDirty`.
+- Dirty tracking is automatic for successful writes and reset at tick start.
+- Slot collisions are diagnosed when a slot is reused with different name or type.
+- Board is control working memory only, not a generic object store and not persistence.

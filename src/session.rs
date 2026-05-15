@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 
-use crate::{DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwPhase};
+use crate::{
+    DwBoard, DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwPhase, DwSlotCollision,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DwRunStatus {
@@ -16,8 +18,9 @@ pub struct DwRuntimeFrame {
     pub Pc: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DwTickResult {
+    pub DirtySlots: Vec<u32>,
     pub Tick: u64,
     pub Status: DwRunStatus,
     pub Frame: Option<DwFrameId>,
@@ -28,18 +31,20 @@ pub struct DwTickResult {
     pub FailureReason: Option<&'static str>,
 }
 
-pub struct DwFrameCtx {
+pub struct DwFrameCtx<'a> {
     Frame: DwFrameId,
     Pc: u32,
     Tick: u64,
+    Board: &'a mut DwBoard,
 }
 
-impl DwFrameCtx {
-    pub fn New(frame: DwFrameId, pc: u32, tick: u64) -> Self {
+impl<'a> DwFrameCtx<'a> {
+    pub fn New(frame: DwFrameId, pc: u32, tick: u64, board: &'a mut DwBoard) -> Self {
         Self {
             Frame: frame,
             Pc: pc,
             Tick: tick,
+            Board: board,
         }
     }
 
@@ -55,6 +60,12 @@ impl DwFrameCtx {
     pub fn Tick(&self) -> u64 {
         self.Tick
     }
+    pub fn Board(&self) -> &DwBoard {
+        self.Board
+    }
+    pub fn BoardMut(&mut self) -> &mut DwBoard {
+        self.Board
+    }
 }
 
 pub struct DwSession {
@@ -65,6 +76,7 @@ pub struct DwSession {
     WaitResumePc: Option<u32>,
     Status: DwRunStatus,
     FailureReason: Option<&'static str>,
+    Board: DwBoard,
 }
 
 impl DwSession {
@@ -87,6 +99,7 @@ impl DwSession {
             WaitResumePc: None,
             Status: DwRunStatus::Running,
             FailureReason: None,
+            Board: DwBoard::New(),
         })
     }
 
@@ -119,12 +132,14 @@ impl DwSession {
             return Ok(r);
         }
 
+        self.Board.ClearDirty();
+
         let active = self.Stack.last().copied().ok_or("runtime stack empty")?;
         let frame = self
             .Registry
             .Find(active.Id)
             .ok_or("active frame missing")?;
-        let mut ctx = DwFrameCtx::New(active.Id, active.Pc, tick_now);
+        let mut ctx = DwFrameCtx::New(active.Id, active.Pc, tick_now, &mut self.Board);
         let control = (frame.Step)(&mut ctx);
         self.ApplyControl(control);
         let r = self.BuildResult(tick_now, Some(Self::Summarize(control)));
@@ -210,6 +225,7 @@ impl DwSession {
             StackDepth: self.Stack.len(),
             Control: control,
             FailureReason: self.FailureReason,
+            DirtySlots: self.Board.DirtySlots(),
         }
     }
 
@@ -224,5 +240,19 @@ impl DwSession {
             DwControl::Complete => DwControlSummary::Complete,
             DwControl::Fail { .. } => DwControlSummary::Fail,
         }
+    }
+}
+
+impl DwSession {
+    pub fn Board(&self) -> &DwBoard {
+        &self.Board
+    }
+
+    pub fn BoardMut(&mut self) -> &mut DwBoard {
+        &mut self.Board
+    }
+
+    pub fn LastBoardSlotCollision(&self) -> Option<DwSlotCollision> {
+        self.Board.LastSlotCollision()
     }
 }
