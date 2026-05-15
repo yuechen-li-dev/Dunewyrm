@@ -15,7 +15,9 @@ pub use mailbox::{DwMailbox, DwMailboxChunk, DwMessage};
 pub use phase::DwPhase;
 pub use registry::{DwFrameDef, DwFrameFn, DwFrameRegistry};
 pub use session::{
-    DwFrameCtx, DwRunStatus, DwRuntimeChunk, DwRuntimeFrame, DwSession, DwTickResult, DwWaitChunk,
+    CompareTrace, DwFrameCtx, DwRunStatus, DwRuntimeChunk, DwRuntimeFrame, DwSession, DwTickResult,
+    DwTickTraceEntry, DwTraceComparison, DwWaitChunk, FormatComparison, FormatTrace,
+    FormatTraceEntry,
 };
 
 pub fn ProjectName() -> &'static str {
@@ -737,6 +739,191 @@ mod tests {
         assert!(
             matches!(restored, Err("chunk stack frame not found in registry")),
             "expected clear restore error when chunk stack references missing frame IDs"
+        );
+    }
+
+    #[test]
+    fn TickTraceRecordsEntriesAndIncludesCoreFields() {
+        let root = DwFrameId {
+            Domain: 8,
+            Local: 1,
+        };
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            if ctx.Pc() == 0 {
+                ctx.BoardMut().Set(Keys::Count, 3).unwrap();
+                ctx.MailboxMut().Enqueue(DwMessage { Kind: 9, Value: 90 });
+                Dw::WaitTicks(1, RootPhase::Done)
+            } else {
+                Dw::Complete()
+            }
+        }
+        let mut reg = DwFrameRegistry::New();
+        reg.Register(DwFrameDef {
+            Id: root,
+            Step: RootF,
+            DebugName: "Root",
+        })
+        .unwrap();
+        let mut session = DwSession::New(reg, root, 0).unwrap();
+        session.Tick().unwrap();
+        session.Tick().unwrap();
+        assert_eq!(
+            session.Trace().len(),
+            2,
+            "expected one trace entry appended per tick"
+        );
+        let entry0 = &session.Trace()[0];
+        assert_eq!(
+            entry0.Tick, 0,
+            "expected first trace entry tick index to start at zero"
+        );
+        assert_eq!(
+            entry0.DirtySlots,
+            vec![2],
+            "expected trace entry to include dirty board slots for the tick"
+        );
+        assert_eq!(
+            entry0.StagedMailbox,
+            vec![DwMessage { Kind: 9, Value: 90 }],
+            "expected trace entry to include staged mailbox snapshot after tick"
+        );
+        assert_eq!(
+            entry0.Stack.len(),
+            1,
+            "expected trace entry stack snapshot to include active frame"
+        );
+    }
+
+    #[test]
+    fn TraceComparisonReportsMatchAndFirstMismatch() {
+        let expected = vec![DwTickTraceEntry {
+            Tick: 0,
+            Status: DwRunStatus::Running,
+            Frame: Some(DwFrameId {
+                Domain: 1,
+                Local: 1,
+            }),
+            Pc: Some(0),
+            Stack: vec![DwRuntimeFrame {
+                Id: DwFrameId {
+                    Domain: 1,
+                    Local: 1,
+                },
+                Pc: 0,
+            }],
+            Control: Some(DwControlSummary::Stay),
+            DirtySlots: vec![],
+            VisibleMailbox: vec![],
+            StagedMailbox: vec![],
+            FailureReason: None,
+        }];
+        let same = expected.clone();
+        let matching = CompareTrace(&expected, &same);
+        assert!(
+            matching.Matches,
+            "expected identical traces to compare as matching"
+        );
+
+        let mut mismatched = expected.clone();
+        mismatched[0].Status = DwRunStatus::Failed;
+        let mismatch = CompareTrace(&expected, &mismatched);
+        assert!(
+            !mismatch.Matches,
+            "expected status mismatch to produce non-matching comparison"
+        );
+        assert_eq!(
+            mismatch.FirstMismatchIndex,
+            Some(0),
+            "expected first mismatch index to identify first divergent entry"
+        );
+        assert!(
+            FormatComparison(&mismatch).contains("mismatch"),
+            "expected formatted comparison text to include mismatch summary"
+        );
+
+        let length_mismatch = CompareTrace(&expected, &[]);
+        assert_eq!(
+            length_mismatch.FirstMismatchIndex,
+            Some(0),
+            "expected length mismatch to report first missing index"
+        );
+    }
+
+    #[test]
+    fn SaveRestoreProducesTraceEquivalentSequence() {
+        let root = DwFrameId {
+            Domain: 9,
+            Local: 1,
+        };
+        fn RootF(ctx: &mut DwFrameCtx) -> DwControl {
+            match ctx.Pc() {
+                0 => {
+                    ctx.BoardMut().Set(Keys::Count, 1).unwrap();
+                    ctx.MailboxMut().Enqueue(DwMessage {
+                        Kind: 30,
+                        Value: 300,
+                    });
+                    Dw::WaitTicks(1, RootPhase::Wait)
+                }
+                1 => {
+                    let _ = ctx.MailboxMut().ConsumeFront();
+                    ctx.BoardMut().Set(Keys::Count, 2).unwrap();
+                    Dw::Continue(RootPhase::Done)
+                }
+                2 => Dw::Complete(),
+                _ => Dw::Fail("bad"),
+            }
+        }
+        let mut reg_u = DwFrameRegistry::New();
+        reg_u
+            .Register(DwFrameDef {
+                Id: root,
+                Step: RootF,
+                DebugName: "Root",
+            })
+            .unwrap();
+        let mut uninterrupted = DwSession::New(reg_u, root, 0).unwrap();
+        for _ in 0..4 {
+            uninterrupted.Tick().unwrap();
+        }
+
+        let mut reg_split = DwFrameRegistry::New();
+        reg_split
+            .Register(DwFrameDef {
+                Id: root,
+                Step: RootF,
+                DebugName: "Root",
+            })
+            .unwrap();
+        let mut split = DwSession::New(reg_split, root, 0).unwrap();
+        split.Tick().unwrap();
+        let pre = split.Trace().to_vec();
+        let chunk = split.ExportChunk();
+
+        let mut reg_restore = DwFrameRegistry::New();
+        reg_restore
+            .Register(DwFrameDef {
+                Id: root,
+                Step: RootF,
+                DebugName: "Root",
+            })
+            .unwrap();
+        let mut restored = DwSession::FromChunk(reg_restore, chunk).unwrap();
+        for _ in 0..3 {
+            restored.Tick().unwrap();
+        }
+
+        let mut combined = pre;
+        combined.extend_from_slice(restored.Trace());
+        let comparison = CompareTrace(uninterrupted.Trace(), &combined);
+        assert!(
+            comparison.Matches,
+            "restored trace should match uninterrupted trace: {}",
+            FormatComparison(&comparison)
+        );
+        assert!(
+            FormatTrace(uninterrupted.Trace()).contains("9:1"),
+            "formatted trace should contain deterministic domain:local frame IDs"
         );
     }
 }

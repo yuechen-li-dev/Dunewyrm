@@ -1,8 +1,10 @@
 #![allow(non_snake_case)]
 
+use std::fmt::Write;
+
 use crate::{
     DwBoard, DwBoardChunk, DwControl, DwControlSummary, DwFrameId, DwFrameRegistry, DwMailbox,
-    DwMailboxChunk, DwMessage, DwPhase, DwSlotCollision,
+    DwMailboxChunk, DwMessage, DwPhase,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,15 +36,151 @@ pub struct DwTickResult {
     pub FailureReason: Option<&'static str>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DwTickTraceEntry {
+    pub Tick: u64,
+    pub Status: DwRunStatus,
+    pub Frame: Option<DwFrameId>,
+    pub Pc: Option<u32>,
+    pub Stack: Vec<DwRuntimeFrame>,
+    pub Control: Option<DwControlSummary>,
+    pub DirtySlots: Vec<u32>,
+    pub VisibleMailbox: Vec<DwMessage>,
+    pub StagedMailbox: Vec<DwMessage>,
+    pub FailureReason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DwTraceComparison {
+    pub Matches: bool,
+    pub FirstMismatchIndex: Option<usize>,
+    pub Reason: Option<String>,
+    pub Expected: Option<DwTickTraceEntry>,
+    pub Actual: Option<DwTickTraceEntry>,
+}
+
+pub fn CompareTrace(
+    expected: &[DwTickTraceEntry],
+    actual: &[DwTickTraceEntry],
+) -> DwTraceComparison {
+    let shared_len = expected.len().min(actual.len());
+    for index in 0..shared_len {
+        if expected[index] != actual[index] {
+            return DwTraceComparison {
+                Matches: false,
+                FirstMismatchIndex: Some(index),
+                Reason: Some(format!("trace entry mismatch at tick index {index}")),
+                Expected: Some(expected[index].clone()),
+                Actual: Some(actual[index].clone()),
+            };
+        }
+    }
+
+    if expected.len() != actual.len() {
+        return DwTraceComparison {
+            Matches: false,
+            FirstMismatchIndex: Some(shared_len),
+            Reason: Some(format!(
+                "trace length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            )),
+            Expected: expected.get(shared_len).cloned(),
+            Actual: actual.get(shared_len).cloned(),
+        };
+    }
+
+    DwTraceComparison {
+        Matches: true,
+        FirstMismatchIndex: None,
+        Reason: None,
+        Expected: None,
+        Actual: None,
+    }
+}
+
+pub fn FormatFrameId(frame: DwFrameId) -> String {
+    format!("{}:{}", frame.Domain, frame.Local)
+}
+
+pub fn FormatTraceEntry(entry: &DwTickTraceEntry) -> String {
+    let mut output = String::new();
+    let _ = write!(
+        output,
+        "tick={} status={:?} frame={} pc={} control={:?} dirty={:?}",
+        entry.Tick,
+        entry.Status,
+        entry
+            .Frame
+            .map(FormatFrameId)
+            .unwrap_or_else(|| "none".to_string()),
+        entry
+            .Pc
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        entry.Control,
+        entry.DirtySlots
+    );
+
+    let stack = entry
+        .Stack
+        .iter()
+        .map(|frame| format!("{}@{}", FormatFrameId(frame.Id), frame.Pc))
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    let _ = write!(output, " stack=[{}]", stack);
+    let _ = write!(
+        output,
+        " visible={:?} staged={:?}",
+        entry.VisibleMailbox, entry.StagedMailbox
+    );
+
+    if let Some(reason) = entry.FailureReason {
+        let _ = write!(output, " failure={reason}");
+    }
+
+    output
+}
+
+pub fn FormatTrace(trace: &[DwTickTraceEntry]) -> String {
+    trace
+        .iter()
+        .map(FormatTraceEntry)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn FormatComparison(comparison: &DwTraceComparison) -> String {
+    if comparison.Matches {
+        return "trace comparison matches".to_string();
+    }
+
+    let mut output = String::new();
+    let _ = write!(
+        output,
+        "trace comparison mismatch index={:?} reason={}",
+        comparison.FirstMismatchIndex,
+        comparison.Reason.clone().unwrap_or_default()
+    );
+    if let Some(expected) = &comparison.Expected {
+        let _ = write!(output, "\nexpected: {}", FormatTraceEntry(expected));
+    }
+    if let Some(actual) = &comparison.Actual {
+        let _ = write!(output, "\nactual: {}", FormatTraceEntry(actual));
+    }
+    output
+}
+
 pub struct DwFrameCtx<'a> {
+    /* unchanged */
     Frame: DwFrameId,
     Pc: u32,
     Tick: u64,
     Board: &'a mut DwBoard,
     Mailbox: &'a mut DwMailbox,
 }
-
 impl<'a> DwFrameCtx<'a> {
+    /* methods */
     pub fn New(
         frame: DwFrameId,
         pc: u32,
@@ -58,7 +196,6 @@ impl<'a> DwFrameCtx<'a> {
             Mailbox: mailbox,
         }
     }
-
     pub fn Frame(&self) -> DwFrameId {
         self.Frame
     }
@@ -95,6 +232,7 @@ pub struct DwSession {
     FailureReason: Option<&'static str>,
     Board: DwBoard,
     Mailbox: DwMailbox,
+    Trace: Vec<DwTickTraceEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,7 +240,6 @@ pub struct DwWaitChunk {
     pub WaitRemaining: u32,
     pub WaitResumePc: Option<u32>,
 }
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct DwRuntimeChunk {
     pub Tick: u64,
@@ -136,61 +273,81 @@ impl DwSession {
             FailureReason: None,
             Board: DwBoard::New(),
             Mailbox: DwMailbox::New(),
+            Trace: Vec::new(),
         })
     }
-
     pub fn Tick(&mut self) -> Result<DwTickResult, &'static str> {
         let tick_now = self.Tick;
-        if self.Status == DwRunStatus::Completed || self.Status == DwRunStatus::Failed {
-            let r = self.BuildResult(tick_now, None);
-            self.Tick += 1;
-            return Ok(r);
-        }
-
-        self.Mailbox.BeginTick();
-
-        if self.WaitRemaining > 0 {
-            self.WaitRemaining -= 1;
-            if self.WaitRemaining == 0 {
-                if let Some(top) = self.Stack.last_mut() {
-                    top.Pc = self.WaitResumePc.expect("wait resume pc should be set");
+        let result = if self.Status == DwRunStatus::Completed || self.Status == DwRunStatus::Failed
+        {
+            self.BuildResult(tick_now, None)
+        } else {
+            self.Mailbox.BeginTick();
+            if self.WaitRemaining > 0 {
+                self.WaitRemaining -= 1;
+                if self.WaitRemaining == 0 {
+                    if let Some(top) = self.Stack.last_mut() {
+                        top.Pc = self.WaitResumePc.expect("wait resume pc should be set");
+                    }
+                    self.WaitResumePc = None;
+                    self.BuildResult(tick_now, Some(DwControlSummary::WaitTicks { Ticks: 0 }))
+                } else {
+                    self.BuildResult(
+                        tick_now,
+                        Some(DwControlSummary::WaitTicks {
+                            Ticks: self.WaitRemaining,
+                        }),
+                    )
                 }
-                self.WaitResumePc = None;
-                let r = self.BuildResult(tick_now, Some(DwControlSummary::WaitTicks { Ticks: 0 }));
-                self.Tick += 1;
-                return Ok(r);
+            } else {
+                self.Board.ClearDirty();
+                let active = self.Stack.last().copied().ok_or("runtime stack empty")?;
+                let frame = self
+                    .Registry
+                    .Find(active.Id)
+                    .ok_or("active frame missing")?;
+                let mut ctx = DwFrameCtx::New(
+                    active.Id,
+                    active.Pc,
+                    tick_now,
+                    &mut self.Board,
+                    &mut self.Mailbox,
+                );
+                let control = (frame.Step)(&mut ctx);
+                self.ApplyControl(control);
+                self.BuildResult(tick_now, Some(Self::Summarize(control)))
             }
-            let r = self.BuildResult(
-                tick_now,
-                Some(DwControlSummary::WaitTicks {
-                    Ticks: self.WaitRemaining,
-                }),
-            );
-            self.Tick += 1;
-            return Ok(r);
-        }
-
-        self.Board.ClearDirty();
-
-        let active = self.Stack.last().copied().ok_or("runtime stack empty")?;
-        let frame = self
-            .Registry
-            .Find(active.Id)
-            .ok_or("active frame missing")?;
-        let mut ctx = DwFrameCtx::New(
-            active.Id,
-            active.Pc,
-            tick_now,
-            &mut self.Board,
-            &mut self.Mailbox,
-        );
-        let control = (frame.Step)(&mut ctx);
-        self.ApplyControl(control);
-        let r = self.BuildResult(tick_now, Some(Self::Summarize(control)));
+        };
+        self.Trace.push(Self::TraceFromResult(&result));
         self.Tick += 1;
-        Ok(r)
+        Ok(result)
     }
-
+    fn TraceFromResult(result: &DwTickResult) -> DwTickTraceEntry {
+        DwTickTraceEntry {
+            Tick: result.Tick,
+            Status: result.Status,
+            Frame: result.Frame,
+            Pc: result.Pc,
+            Stack: result.Stack.iter().flatten().copied().collect(),
+            Control: result.Control,
+            DirtySlots: result.DirtySlots.clone(),
+            VisibleMailbox: result.VisibleMailbox.clone(),
+            StagedMailbox: result.StagedMailbox.clone(),
+            FailureReason: result.FailureReason,
+        }
+    }
+    pub fn Trace(&self) -> &[DwTickTraceEntry] {
+        &self.Trace
+    }
+    pub fn Board(&self) -> &DwBoard {
+        &self.Board
+    }
+    pub fn Mailbox(&self) -> &DwMailbox {
+        &self.Mailbox
+    }
+    pub fn MailboxMut(&mut self) -> &mut DwMailbox {
+        &mut self.Mailbox
+    }
     pub fn ExportChunk(&self) -> DwRuntimeChunk {
         DwRuntimeChunk {
             Tick: self.Tick,
@@ -205,7 +362,6 @@ impl DwSession {
             Mailbox: self.Mailbox.ExportChunk(),
         }
     }
-
     pub fn FromChunk(
         registry: DwFrameRegistry,
         chunk: DwRuntimeChunk,
@@ -215,7 +371,6 @@ impl DwSession {
                 return Err("chunk stack frame not found in registry");
             }
         }
-
         Ok(Self {
             Registry: registry,
             Stack: chunk.Stack,
@@ -226,9 +381,9 @@ impl DwSession {
             FailureReason: chunk.FailureReason,
             Board: DwBoard::FromChunk(chunk.Board),
             Mailbox: DwMailbox::FromChunk(chunk.Mailbox),
+            Trace: Vec::new(),
         })
     }
-
     fn ApplyControl(&mut self, control: DwControl) {
         match control {
             DwControl::Continue { Pc } => {
@@ -283,12 +438,10 @@ impl DwSession {
             DwControl::Fail { Reason } => self.FailNow(Reason),
         }
     }
-
     fn FailNow(&mut self, reason: &'static str) {
         self.Status = DwRunStatus::Failed;
         self.FailureReason = Some(reason);
     }
-
     fn BuildResult(&mut self, tick_now: u64, control: Option<DwControlSummary>) -> DwTickResult {
         if self.Status == DwRunStatus::Waiting && self.WaitRemaining == 0 {
             self.Status = DwRunStatus::Running;
@@ -312,7 +465,6 @@ impl DwSession {
             StagedMailbox: self.Mailbox.StagedSnapshot(),
         }
     }
-
     fn Summarize(control: DwControl) -> DwControlSummary {
         match control {
             DwControl::Continue { .. } => DwControlSummary::Continue,
@@ -324,27 +476,5 @@ impl DwSession {
             DwControl::Complete => DwControlSummary::Complete,
             DwControl::Fail { .. } => DwControlSummary::Fail,
         }
-    }
-}
-
-impl DwSession {
-    pub fn Board(&self) -> &DwBoard {
-        &self.Board
-    }
-
-    pub fn BoardMut(&mut self) -> &mut DwBoard {
-        &mut self.Board
-    }
-
-    pub fn LastBoardSlotCollision(&self) -> Option<DwSlotCollision> {
-        self.Board.LastSlotCollision()
-    }
-
-    pub fn Mailbox(&self) -> &DwMailbox {
-        &self.Mailbox
-    }
-
-    pub fn MailboxMut(&mut self) -> &mut DwMailbox {
-        &mut self.Mailbox
     }
 }
