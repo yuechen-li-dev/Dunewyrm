@@ -1,5 +1,18 @@
 # AGENTS.md
 
+## Naming
+
+Use CamelCase for Dunewyrm public and author-facing functions.
+
+Do not convert function names to Rust `snake_case`. Dunewyrm is part of a cross-language control-kernel family, and naming consistency across Dominatus, DragonGod, Dreadfang, and future generated backends is more important than local Rust style convention.
+
+Rust’s `non_snake_case` lint should be disabled where needed:
+
+```rust
+#![allow(non_snake_case)]
+```
+when needed. This is intentional, not a temporary suppression.
+
 ## Primer
 
 Read `primer/` before writing or editing code.
