@@ -69,3 +69,10 @@ cargo test
 - It defines its own frame IDs, act IDs, and board keys, then builds a registry through public APIs only.
 - Integration tests in `tests/m9_guard_patrol_sample.rs` exercise stack, board, mailbox, utility decisions, immediate/deferred actuation, trace comparison, and save/restore equivalence.
 - The sample is deliberately small; larger domain samples are deferred to later milestones.
+
+## M11 WyrmCoil prototype sample
+
+- `samples/wyrmcoil.rs` adds a tiny engine-core prototype scaffold authored as external-style library usage.
+- Thesis: **frames decide, stores iterate, acts connect, mailbox reports back, chunks persist both**.
+- WyrmCoil intentionally uses dense typed stores (`Vec<WcVec2>`, `Vec<bool>`) and fixed act IDs; it does **not** implement ECS, renderer, physics, or payload redesign.
+- `tests/m11_wyrmcoil_sample.rs` validates deterministic store updates, act bridging, engine tick behavior, mailbox-to-act flow, and runtime+world chunk restore equivalence.
