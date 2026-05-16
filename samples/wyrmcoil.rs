@@ -27,6 +27,37 @@ pub struct WcTransformStore {
     pub Velocities: Vec<WcVec2>,
     pub Alive: Vec<bool>,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub struct WcHealthStore {
+    pub Health: Vec<f32>,
+}
+impl WcHealthStore {
+    pub fn New() -> Self {
+        Self { Health: Vec::new() }
+    }
+    pub fn Spawn(&mut self, health: f32) {
+        self.Health.push(health);
+    }
+    pub fn SetHealth(&mut self, id: WcEntityId, health: f32) {
+        if id.0 < self.Health.len() {
+            self.Health[id.0] = health;
+        }
+    }
+    pub fn ExportChunk(&self) -> WcHealthStoreChunk {
+        WcHealthStoreChunk {
+            Health: self.Health.clone(),
+        }
+    }
+    pub fn FromChunk(chunk: WcHealthStoreChunk) -> Self {
+        Self {
+            Health: chunk.Health,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct WcHealthStoreChunk {
+    pub Health: Vec<f32>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WcTransformStoreChunk {
@@ -93,15 +124,63 @@ impl WcTransformStore {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WcWorld {
     pub Transforms: WcTransformStore,
+    pub Health: WcHealthStore,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct WcWorldChunk {
     pub Transforms: WcTransformStoreChunk,
+    pub Health: WcHealthStoreChunk,
 }
 impl WcWorld {
     pub fn New() -> Self {
         Self {
             Transforms: WcTransformStore::New(),
+            Health: WcHealthStore::New(),
+        }
+    }
+    pub fn SpawnEntity(&mut self, position: WcVec2, health: f32) -> WcEntityId {
+        let entity = self.Transforms.Spawn(position);
+        self.Health.Spawn(health);
+        entity
+    }
+    pub fn FindLowestHealthAliveEntity(&self) -> Option<WcEntityId> {
+        let mut selected: Option<WcEntityId> = None;
+        let mut selected_health = 0.0_f32;
+        let count = self.Transforms.Alive.len().min(self.Health.Health.len());
+        for index in 0..count {
+            if !self.Transforms.Alive[index] {
+                continue;
+            }
+            let health = self.Health.Health[index];
+            if selected.is_none() || health < selected_health {
+                selected = Some(WcEntityId(index));
+                selected_health = health;
+            }
+        }
+        selected
+    }
+    pub fn RefreshSelectionBoard(&self, board: &mut dunewyrm::DwBoard) {
+        let selected = self.FindLowestHealthAliveEntity();
+        if let Some(entity) = selected {
+            board
+                .Set(WcKeys::HasSelection, true)
+                .expect("selection flag should write when query finds alive entity");
+            board
+                .Set(WcKeys::SelectedEntity, entity.0 as i32)
+                .expect("selected entity should write when query finds alive entity");
+            board
+                .Set(WcKeys::SelectedHealth, self.Health.Health[entity.0])
+                .expect("selected health should write when query finds alive entity");
+        } else {
+            board
+                .Set(WcKeys::HasSelection, false)
+                .expect("selection flag should write when query does not find alive entity");
+            board
+                .Set(WcKeys::SelectedEntity, -1)
+                .expect("selected entity sentinel should write when query finds no alive entity");
+            board
+                .Set(WcKeys::SelectedHealth, -1.0)
+                .expect("selected health sentinel should write when query finds no alive entity");
         }
     }
     pub fn Tick(&mut self) {
@@ -110,11 +189,13 @@ impl WcWorld {
     pub fn ExportChunk(&self) -> WcWorldChunk {
         WcWorldChunk {
             Transforms: self.Transforms.ExportChunk(),
+            Health: self.Health.ExportChunk(),
         }
     }
     pub fn FromChunk(chunk: WcWorldChunk) -> Self {
         Self {
             Transforms: WcTransformStore::FromChunk(chunk.Transforms),
+            Health: WcHealthStore::FromChunk(chunk.Health),
         }
     }
 }
@@ -141,6 +222,9 @@ pub mod WcKeys {
     pub const CommandVelocityY: DwKey<f32> = DwKey::New("CommandVelocityY", 23);
     pub const CommandDeltaX: DwKey<f32> = DwKey::New("CommandDeltaX", 24);
     pub const CommandDeltaY: DwKey<f32> = DwKey::New("CommandDeltaY", 25);
+    pub const HasSelection: DwKey<bool> = DwKey::New("HasSelection", 26);
+    pub const SelectedEntity: DwKey<i32> = DwKey::New("SelectedEntity", 27);
+    pub const SelectedHealth: DwKey<f32> = DwKey::New("SelectedHealth", 28);
 }
 pub mod WcMailKinds {
     pub const MovePlayerRight: u32 = 1;
@@ -252,11 +336,31 @@ fn Player(ctx: &mut DwFrameCtx) -> DwControl {
 fn Guard(ctx: &mut DwFrameCtx) -> DwControl {
     match ctx.Phase::<UnitPhase>() {
         Some(UnitPhase::Enter) => {
-            QueueVelocityCommand(ctx, 1, 0.0, 1.0);
-            if ctx.Board().GetOr(WcKeys::GuardAlert, false) {
+            let mut velocity_x = 0.0;
+            let mut velocity_y = 1.0;
+            if ctx.Board().GetOr(WcKeys::HasSelection, false) {
+                let selected_entity = ctx.Board().GetOr(WcKeys::SelectedEntity, -1);
+                if selected_entity >= 0 {
+                    ctx.BoardMut()
+                        .Set(WcKeys::CommandEntity, selected_entity)
+                        .expect("guard query selected entity write should succeed");
+                    velocity_x = 0.5;
+                    velocity_y = 0.5;
+                }
+            } else {
                 ctx.BoardMut()
                     .Set(WcKeys::CommandEntity, 1)
-                    .expect("guard command entity write should succeed");
+                    .expect("guard fallback command entity write should succeed");
+            }
+            QueueVelocityCommand(
+                ctx,
+                ctx.Board().GetOr(WcKeys::CommandEntity, 1),
+                velocity_x,
+                velocity_y,
+            );
+            if ctx.Board().GetOr(WcKeys::GuardAlert, false)
+                && ctx.Board().GetOr(WcKeys::HasSelection, false)
+            {
                 ctx.BoardMut()
                     .Set(WcKeys::CommandVelocityX, 1.0)
                     .expect("guard command velocity x write should succeed");
@@ -354,8 +458,8 @@ pub struct WcTickResult {
 impl WcEngine {
     pub fn New() -> Self {
         let mut world = WcWorld::New();
-        let player = world.Transforms.Spawn(WcVec2::Zero());
-        let guard = world.Transforms.Spawn(WcVec2 { X: 5.0, Y: 5.0 });
+        let player = world.SpawnEntity(WcVec2::Zero(), 100.0);
+        let guard = world.SpawnEntity(WcVec2 { X: 5.0, Y: 5.0 }, 80.0);
         let session = DwSession::New(BuildRegistry(), WcFrames::Root, 0)
             .expect("WyrmCoil session should construct");
         Self {
@@ -366,6 +470,7 @@ impl WcEngine {
         }
     }
     pub fn Tick(&mut self) -> WcTickResult {
+        self.World.RefreshSelectionBoard(self.Session.BoardMut());
         let runtime = self
             .Session
             .Tick()

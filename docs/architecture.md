@@ -108,3 +108,12 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - Dunewyrm core actuation stays unchanged: act IDs remain payload-free and generic.
 - The M12 bridge reads board keys to resolve entity-targeted command parameters and updates dense world lanes explicitly.
 - This pass is intentionally bounded to sample/prototype behavior and exists to measure pressure for any later core payload design.
+
+### M13 query / selection pressure extension
+
+- WyrmCoil extends the sample/prototype with deterministic dense-store query/selection over explicit health lanes.
+- Query and selection remain data-layer responsibilities in sample-local world helpers, not core runtime APIs.
+- Query results are summarized into explicit board keys and consumed by frame control logic on later runtime steps.
+- Existing act payload-free Dunewyrm actuation remains unchanged; selected entities flow through board-backed command intent.
+- This pass does not add ECS, archetype storage, dynamic component queries, renderer, physics, or UI layers.
+- **Stores query. Frames decide. Acts connect. Mailbox reports back. Chunks persist both.**
