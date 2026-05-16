@@ -93,10 +93,18 @@ Dunewyrm is a Rust-native sibling of DragonGod, not a line-by-line port.
 - M9 intentionally does not add broad sample frameworks or runtime redesign.
 
 
-## M11 WyrmCoil prototype scaffold
+## M11/M12 WyrmCoil prototype scaffold
 
 - WyrmCoil is a sample/prototype layer outside core runtime modules (`samples/wyrmcoil.rs`).
 - Dunewyrm remains the behavioral control spine (frames/stack/mailbox/acts/chunks).
 - World data lanes stay dense and typed in explicit stores (no ECS/archetype/query framework in M11).
 - Engine chunk composition is explicit: `WcEngineChunk = DwRuntimeChunk + WcWorldChunk`.
 - M11 intentionally excludes renderer/physics/UI systems and act payload redesign.
+
+
+### M12 entity command pressure extension
+
+- WyrmCoil extends the prototype with multi-entity command routing using sample-local typed board intent.
+- Dunewyrm core actuation stays unchanged: act IDs remain payload-free and generic.
+- The M12 bridge reads board keys to resolve entity-targeted command parameters and updates dense world lanes explicitly.
+- This pass is intentionally bounded to sample/prototype behavior and exists to measure pressure for any later core payload design.

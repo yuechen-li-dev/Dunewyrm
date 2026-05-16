@@ -2,8 +2,8 @@
 #![allow(non_upper_case_globals)]
 
 use dunewyrm::{
-    Dw, DwActRequest, DwControl, DwFrameCtx, DwFrameDef, DwFrameRegistry, DwMessage, DwPhase,
-    DwRuntimeChunk, DwSession, DwTickResult,
+    Dw, DwActRequest, DwControl, DwFrameCtx, DwFrameDef, DwFrameRegistry, DwKey, DwMessage,
+    DwPhase, DwRuntimeChunk, DwSession, DwTickResult,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -49,6 +49,11 @@ impl WcTransformStore {
         self.Velocities.push(WcVec2::Zero());
         self.Alive.push(true);
         id
+    }
+    pub fn SetAlive(&mut self, id: WcEntityId, alive: bool) {
+        if id.0 < self.Alive.len() {
+            self.Alive[id.0] = alive;
+        }
     }
     pub fn SetVelocity(&mut self, id: WcEntityId, velocity: WcVec2) {
         if id.0 < self.Velocities.len() && self.Alive[id.0] {
@@ -124,21 +129,25 @@ pub mod WcFrames {
 pub mod WcActs {
     use dunewyrm::DwActId;
     pub const Domain: u64 = 311;
-    pub const MovePlayerRight: DwActId = DwActId { Domain, Local: 1 };
-    pub const MovePlayerLeft: DwActId = DwActId { Domain, Local: 2 };
-    pub const StopPlayer: DwActId = DwActId { Domain, Local: 3 };
-    pub const EnemyStep: DwActId = DwActId { Domain, Local: 4 };
-    pub const CallBackup: DwActId = DwActId { Domain, Local: 5 };
+    pub const ApplyVelocityCommand: DwActId = DwActId { Domain, Local: 1 };
+    pub const NudgeEntityCommand: DwActId = DwActId { Domain, Local: 2 };
+    pub const GuardStep: DwActId = DwActId { Domain, Local: 3 };
 }
 pub mod WcKeys {
-    use dunewyrm::DwKey;
+    use super::DwKey;
     pub const GuardAlert: DwKey<bool> = DwKey::New("GuardAlert", 20);
+    pub const CommandEntity: DwKey<i32> = DwKey::New("CommandEntity", 21);
+    pub const CommandVelocityX: DwKey<f32> = DwKey::New("CommandVelocityX", 22);
+    pub const CommandVelocityY: DwKey<f32> = DwKey::New("CommandVelocityY", 23);
+    pub const CommandDeltaX: DwKey<f32> = DwKey::New("CommandDeltaX", 24);
+    pub const CommandDeltaY: DwKey<f32> = DwKey::New("CommandDeltaY", 25);
 }
 pub mod WcMailKinds {
-    pub const MoveRight: u32 = 1;
-    pub const MoveLeft: u32 = 2;
-    pub const Stop: u32 = 3;
+    pub const MovePlayerRight: u32 = 1;
+    pub const MovePlayerLeft: u32 = 2;
+    pub const StopPlayer: u32 = 3;
     pub const AlertGuard: u32 = 4;
+    pub const NudgeGuardUp: u32 = 5;
 }
 
 #[derive(Clone, Copy)]
@@ -193,20 +202,45 @@ fn Root(ctx: &mut DwFrameCtx) -> DwControl {
         None => Dw::Fail("wyrmcoil root phase invalid"),
     }
 }
+
+fn QueueVelocityCommand(ctx: &mut DwFrameCtx, entity: i32, x: f32, y: f32) {
+    ctx.BoardMut()
+        .Set(WcKeys::CommandEntity, entity)
+        .expect("command entity key write should succeed");
+    ctx.BoardMut()
+        .Set(WcKeys::CommandVelocityX, x)
+        .expect("command velocity x key write should succeed");
+    ctx.BoardMut()
+        .Set(WcKeys::CommandVelocityY, y)
+        .expect("command velocity y key write should succeed");
+    ctx.Immediate(WcActs::ApplyVelocityCommand);
+}
+
 fn Player(ctx: &mut DwFrameCtx) -> DwControl {
     match ctx.Phase::<UnitPhase>() {
         Some(UnitPhase::Enter) => {
             while let Some(message) = ctx.MailboxMut().ConsumeFront() {
-                if message.Kind == WcMailKinds::MoveRight {
-                    ctx.Immediate(WcActs::MovePlayerRight);
-                } else if message.Kind == WcMailKinds::MoveLeft {
-                    ctx.Immediate(WcActs::MovePlayerLeft);
-                } else if message.Kind == WcMailKinds::Stop {
-                    ctx.Immediate(WcActs::StopPlayer);
+                if message.Kind == WcMailKinds::MovePlayerRight {
+                    QueueVelocityCommand(ctx, 0, 1.0, 0.0);
+                } else if message.Kind == WcMailKinds::MovePlayerLeft {
+                    QueueVelocityCommand(ctx, 0, -1.0, 0.0);
+                } else if message.Kind == WcMailKinds::StopPlayer {
+                    QueueVelocityCommand(ctx, 0, 0.0, 0.0);
                 } else if message.Kind == WcMailKinds::AlertGuard {
                     ctx.BoardMut()
                         .Set(WcKeys::GuardAlert, true)
                         .expect("guard alert key write should succeed");
+                } else if message.Kind == WcMailKinds::NudgeGuardUp {
+                    ctx.BoardMut()
+                        .Set(WcKeys::CommandEntity, 1)
+                        .expect("nudge command entity write should succeed");
+                    ctx.BoardMut()
+                        .Set(WcKeys::CommandDeltaX, 0.0)
+                        .expect("nudge command delta x write should succeed");
+                    ctx.BoardMut()
+                        .Set(WcKeys::CommandDeltaY, 2.0)
+                        .expect("nudge command delta y write should succeed");
+                    ctx.Immediate(WcActs::NudgeEntityCommand);
                 }
             }
             Dw::Continue(UnitPhase::Finish)
@@ -218,10 +252,20 @@ fn Player(ctx: &mut DwFrameCtx) -> DwControl {
 fn Guard(ctx: &mut DwFrameCtx) -> DwControl {
     match ctx.Phase::<UnitPhase>() {
         Some(UnitPhase::Enter) => {
-            ctx.Immediate(WcActs::EnemyStep);
+            QueueVelocityCommand(ctx, 1, 0.0, 1.0);
             if ctx.Board().GetOr(WcKeys::GuardAlert, false) {
-                ctx.Deferred(WcActs::CallBackup, 1);
+                ctx.BoardMut()
+                    .Set(WcKeys::CommandEntity, 1)
+                    .expect("guard command entity write should succeed");
+                ctx.BoardMut()
+                    .Set(WcKeys::CommandVelocityX, 1.0)
+                    .expect("guard command velocity x write should succeed");
+                ctx.BoardMut()
+                    .Set(WcKeys::CommandVelocityY, 1.0)
+                    .expect("guard command velocity y write should succeed");
+                ctx.Deferred(WcActs::ApplyVelocityCommand, 1);
             }
+            ctx.Immediate(WcActs::GuardStep);
             Dw::Continue(UnitPhase::Finish)
         }
         Some(UnitPhase::Finish) => Dw::Pop(),
@@ -255,31 +299,36 @@ pub fn BuildRegistry() -> DwFrameRegistry {
     registry
 }
 
-pub fn DispatchActs(
-    world: &mut WcWorld,
-    acts: &[DwActRequest],
-    player: WcEntityId,
-    guard: WcEntityId,
-) {
+pub fn DispatchActs(world: &mut WcWorld, board: &dunewyrm::DwBoard, acts: &[DwActRequest]) {
     for act in acts {
-        if act.Id == WcActs::MovePlayerRight {
-            world
-                .Transforms
-                .SetVelocity(player, WcVec2 { X: 1.0, Y: 0.0 });
-        } else if act.Id == WcActs::MovePlayerLeft {
-            world
-                .Transforms
-                .SetVelocity(player, WcVec2 { X: -1.0, Y: 0.0 });
-        } else if act.Id == WcActs::StopPlayer {
-            world.Transforms.SetVelocity(player, WcVec2::Zero());
-        } else if act.Id == WcActs::EnemyStep {
-            world
-                .Transforms
-                .SetVelocity(guard, WcVec2 { X: 0.0, Y: 1.0 });
-        } else if act.Id == WcActs::CallBackup {
-            world
-                .Transforms
-                .SetVelocity(guard, WcVec2 { X: 1.0, Y: 1.0 });
+        if act.Id == WcActs::ApplyVelocityCommand {
+            let entity = board.GetOr(WcKeys::CommandEntity, -1);
+            let velocity_x = board.GetOr(WcKeys::CommandVelocityX, 0.0);
+            let velocity_y = board.GetOr(WcKeys::CommandVelocityY, 0.0);
+            if entity >= 0 {
+                world.Transforms.SetVelocity(
+                    WcEntityId(entity as usize),
+                    WcVec2 {
+                        X: velocity_x,
+                        Y: velocity_y,
+                    },
+                );
+            }
+        } else if act.Id == WcActs::NudgeEntityCommand {
+            let entity = board.GetOr(WcKeys::CommandEntity, -1);
+            let delta_x = board.GetOr(WcKeys::CommandDeltaX, 0.0);
+            let delta_y = board.GetOr(WcKeys::CommandDeltaY, 0.0);
+            if entity >= 0 {
+                let target = WcEntityId(entity as usize);
+                if let Some(position) = world.Transforms.Position(target) {
+                    if target.0 < world.Transforms.Alive.len() && world.Transforms.Alive[target.0] {
+                        world.Transforms.Positions[target.0] = WcVec2 {
+                            X: position.X + delta_x,
+                            Y: position.Y + delta_y,
+                        };
+                    }
+                }
+            }
         }
     }
 }
@@ -323,15 +372,13 @@ impl WcEngine {
             .expect("WyrmCoil engine tick should succeed");
         DispatchActs(
             &mut self.World,
+            self.Session.Board(),
             &runtime.ImmediateActs,
-            self.Player,
-            self.Guard,
         );
         DispatchActs(
             &mut self.World,
+            self.Session.Board(),
             &runtime.MaturedDeferredActs,
-            self.Player,
-            self.Guard,
         );
         self.World.Tick();
         WcTickResult {
@@ -361,25 +408,31 @@ impl WcEngine {
 
 pub fn MoveRightMessage() -> DwMessage {
     DwMessage {
-        Kind: WcMailKinds::MoveRight,
+        Kind: WcMailKinds::MovePlayerRight,
         Value: 1,
     }
 }
 pub fn MoveLeftMessage() -> DwMessage {
     DwMessage {
-        Kind: WcMailKinds::MoveLeft,
+        Kind: WcMailKinds::MovePlayerLeft,
         Value: 1,
     }
 }
 pub fn StopMessage() -> DwMessage {
     DwMessage {
-        Kind: WcMailKinds::Stop,
+        Kind: WcMailKinds::StopPlayer,
         Value: 1,
     }
 }
 pub fn AlertGuardMessage() -> DwMessage {
     DwMessage {
         Kind: WcMailKinds::AlertGuard,
+        Value: 1,
+    }
+}
+pub fn NudgeGuardMessage() -> DwMessage {
+    DwMessage {
+        Kind: WcMailKinds::NudgeGuardUp,
         Value: 1,
     }
 }
