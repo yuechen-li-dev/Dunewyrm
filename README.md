@@ -84,3 +84,11 @@ cargo test
 - Sample frames write command intent into typed board keys (`CommandEntity`, command vector lanes), then emit known command act IDs.
 - The sample act bridge reads board-backed command intent and mutates dense world stores for the targeted entity.
 - This is an explicit sample-local workaround to evaluate payload pressure; it is not a core actuation redesign or ECS implementation.
+
+## M13 WyrmCoil query / selection pressure test
+
+- WyrmCoil adds a dense health lane and deterministic sample-local query helpers to pressure-test selection over multiple entities.
+- Query summaries are written into explicit board keys (`HasSelection`, `SelectedEntity`, `SelectedHealth`) before frame execution.
+- Frame logic consumes that summarized selection state and routes existing board-backed command intent through unchanged Dunewyrm act IDs.
+- This pass keeps query behavior in the sample data layer, not in core runtime modules, and does not add ECS/archetype/query infrastructure.
+- **Stores query. Frames decide. Acts connect. Mailbox reports back. Chunks persist both.**

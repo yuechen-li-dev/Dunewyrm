@@ -36,10 +36,44 @@ fn DenseStoreMultiEntityVelocityAliveFilteringAndChunkRoundTrip() {
 }
 
 #[test]
+fn DenseHealthQuerySelectsLowestAliveWithDeterministicTieAndChunkRoundTrip() {
+    let mut world = wyrmcoil::WcWorld::New();
+    let a = world.SpawnEntity(wyrmcoil::WcVec2::Zero(), 20.0);
+    let b = world.SpawnEntity(wyrmcoil::WcVec2::Zero(), 10.0);
+    let c = world.SpawnEntity(wyrmcoil::WcVec2::Zero(), 10.0);
+    world.Transforms.SetAlive(b, false);
+
+    let selected = world.FindLowestHealthAliveEntity();
+    assert_eq!(
+        selected,
+        Some(c),
+        "lowest-health query should ignore dead entities and select the lowest-health alive entity with lowest index tie-break among alive lanes"
+    );
+
+    world.Transforms.SetAlive(c, false);
+    world.Transforms.SetAlive(a, false);
+    assert_eq!(
+        world.FindLowestHealthAliveEntity(),
+        None,
+        "lowest-health query should return no selection when all entities are non-alive"
+    );
+
+    let mut world2 = wyrmcoil::WcWorld::New();
+    let x = world2.SpawnEntity(wyrmcoil::WcVec2::Zero(), 3.0);
+    world2.Health.SetHealth(x, 2.5);
+    let chunk = world2.ExportChunk();
+    let restored = wyrmcoil::WcWorld::FromChunk(chunk);
+    assert_eq!(
+        restored, world2,
+        "world chunk restore should preserve health and transform lanes used by deterministic selection query"
+    );
+}
+
+#[test]
 fn ActBridgeReadsBoardBackedCommandIntentAndTargetsOnlyRequestedEntity() {
     let mut world = wyrmcoil::WcWorld::New();
-    let player = world.Transforms.Spawn(wyrmcoil::WcVec2::Zero());
-    let guard = world.Transforms.Spawn(wyrmcoil::WcVec2::Zero());
+    let player = world.SpawnEntity(wyrmcoil::WcVec2::Zero(), 100.0);
+    let guard = world.SpawnEntity(wyrmcoil::WcVec2::Zero(), 100.0);
 
     let mut board = dunewyrm::DwBoard::New();
     board
@@ -129,6 +163,19 @@ fn EngineTickMailboxCommandWritesBoardAndDispatchesCommandActs() {
             && t1.Runtime.DirtySlots.contains(&23),
         "typed command board keys should be marked dirty when command intent is written by frame logic"
     );
+    assert_eq!(
+        engine.Session.Board().GetOr(wyrmcoil::WcKeys::HasSelection, false),
+        true,
+        "engine tick should leave board-backed selection summary available for frame consumption after deterministic dense query step"
+    );
+    assert!(
+        engine
+            .Session
+            .Board()
+            .GetOr(wyrmcoil::WcKeys::SelectedEntity, -1)
+            >= 0,
+        "engine tick should leave selected entity index on board after deterministic dense query step"
+    );
 
     let before_guard = engine
         .World
@@ -148,6 +195,68 @@ fn EngineTickMailboxCommandWritesBoardAndDispatchesCommandActs() {
     assert!(
         after_guard.Y > before_guard.Y,
         "guard position should advance after guard command acts and world integration execute"
+    );
+}
+
+#[test]
+fn QuerySelectionFeedsControlAndMutatesSelectedEntityOnly() {
+    let mut engine = wyrmcoil::WcEngine::New();
+    let selected = engine.Guard;
+    let non_selected = engine.Player;
+    engine.World.Health.SetHealth(engine.Player, 90.0);
+    engine.World.Health.SetHealth(engine.Guard, 10.0);
+    engine
+        .World
+        .RefreshSelectionBoard(engine.Session.BoardMut());
+    assert_eq!(
+        engine
+            .Session
+            .Board()
+            .GetOr(wyrmcoil::WcKeys::HasSelection, false),
+        true,
+        "selection summary should report true when at least one alive entity exists"
+    );
+    assert_eq!(
+        engine
+            .Session
+            .Board()
+            .GetOr(wyrmcoil::WcKeys::SelectedEntity, -1),
+        selected.0 as i32,
+        "selection summary should report the deterministic lowest-health alive entity index on the board"
+    );
+
+    let baseline_selected_position = engine
+        .World
+        .Transforms
+        .Position(selected)
+        .expect("selected entity should exist before query-to-control test tick");
+    let baseline_other_position = engine
+        .World
+        .Transforms
+        .Position(non_selected)
+        .expect("non-selected entity should exist before query-to-control test tick");
+
+    for _ in 0..8 {
+        engine.Tick();
+    }
+
+    let updated_selected_position = engine
+        .World
+        .Transforms
+        .Position(selected)
+        .expect("selected entity should exist after query-to-control test ticks");
+    let updated_other_position = engine
+        .World
+        .Transforms
+        .Position(non_selected)
+        .expect("non-selected entity should exist after query-to-control test ticks");
+    assert_ne!(
+        updated_selected_position, baseline_selected_position,
+        "guard frame should route ApplyVelocityCommand through board-backed selected entity key and move selected position lane"
+    );
+    assert_eq!(
+        updated_other_position, baseline_other_position,
+        "query-driven command routing should leave non-selected entity position unchanged in this bounded pressure test"
     );
 }
 
